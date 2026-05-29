@@ -28,15 +28,17 @@ namespace pccam_32.Presenters
         private readonly AuthDllAdapter _authDllAdapter;
         private readonly PowerPolicyService _powerPolicyService;
         private readonly AutoStartService _autoStartService;
+        private readonly FirewallService _firewallService;
         private readonly LogService _logService;
 
         private AppConfig _config;
         private SettingView _settingView;
         private SettingPresenter _settingPresenter;
         private bool _disposed;
-        //private TrayApplicationContext trayView;
-        private readonly FirewallService _firewallService;
 
+        /// <summary>
+        /// TrayPresenter를 생성한다.
+        /// </summary>
         public TrayPresenter(
             ITrayView view,
             PathProvider pathProvider,
@@ -46,8 +48,7 @@ namespace pccam_32.Presenters
             PowerPolicyService powerPolicyService,
             AutoStartService autoStartService,
             FirewallService firewallService,
-            LogService logService
-            )
+            LogService logService)
         {
             if (view == null)
                 throw new ArgumentNullException("view");
@@ -70,11 +71,12 @@ namespace pccam_32.Presenters
             if (autoStartService == null)
                 throw new ArgumentNullException("autoStartService");
 
+            if (firewallService == null)
+                throw new ArgumentNullException("firewallService");
+
             if (logService == null)
                 throw new ArgumentNullException("logService");
 
-            if (firewallService == null)
-                throw new ArgumentNullException("firewallService");
             _view = view;
             _pathProvider = pathProvider;
             _configService = configService;
@@ -82,6 +84,7 @@ namespace pccam_32.Presenters
             _authDllAdapter = authDllAdapter;
             _powerPolicyService = powerPolicyService;
             _autoStartService = autoStartService;
+            _firewallService = firewallService;
             _logService = logService;
 
             _view.SettingRequested += OnSettingRequested;
@@ -89,41 +92,23 @@ namespace pccam_32.Presenters
 
             _supervisor.StatusChanged += OnStatusChanged;
             _supervisor.LogReceived += OnLogReceived;
-            _firewallService = firewallService;
 
             Initialize();
-
-        }
-
-        public TrayPresenter(TrayApplicationContext trayView, PathProvider pathProvider, ConfigService configService, StreamSupervisorService supervisor, AuthDllAdapter authDllAdapter, PowerPolicyService powerPolicyService, LogService logService)
-        {
-            //this.trayView = trayView;
-            _pathProvider = pathProvider;
-            _configService = configService;
-            _supervisor = supervisor;
-            _authDllAdapter = authDllAdapter;
-            _powerPolicyService = powerPolicyService;
-            _logService = logService;
         }
 
         /// <summary>
         /// 트레이 Presenter를 초기화한다.
         /// 
+        /// 처리 순서:
+        /// 1. 설정 파일 로드
+        /// 2. 트레이 기본 상태 표시
+        /// 3. 운영 정책 적용
         /// 4. 로컬 인증 등록 상태 표시
         /// 5. 로컬 인증정보가 있고 자동 송출 설정이 켜져 있으면 송출 시작 요청
         /// 
         /// 주의:
-        /// 4. 로컬 인증 등록 상태 표시
-        /// 트레이에는 로컬 인증정보 존재 여부만 표시하고,
-        /// 실제 서버 인증은 StreamSupervisorService.Start()에서 송출 시작 직전에 수행한다.
-        /// 주의:
-        /// 4. 로컬 인증 등록 상태 표시
-        /// 실제 서버 인증은 StreamSupervisorService.Start()에서 송출 시작 직전에 1회만 수행한다.
->>>>>>>>> Temporary merge branch 2
-        /// 주의:
         /// 이 단계에서는 인증서버 Verify를 호출하지 않는다.
         /// 실제 서버 인증은 StreamSupervisorService.Start()에서 송출 시작 직전에 1회만 수행한다.
->>>>>>>>> Temporary merge branch 2
         /// </summary>
         private void Initialize()
         {
@@ -343,7 +328,6 @@ namespace pccam_32.Presenters
             ApplyFirewallPolicy();
         }
 
-
         /// <summary>
         /// 절전모드 방지 정책을 적용한다.
         /// 
@@ -403,19 +387,12 @@ namespace pccam_32.Presenters
                 _logService.WriteApp("방화벽 정책 적용 완료");
             }
             catch (Exception ex)
-<<<<<<<<< Temporary merge branch 1
-        /// <summary>
-        /// 현재 인증 상태를 다시 확인하고 트레이 인증상태 표시를 갱신한다.
-        /// 
-        /// 인증상태 메뉴는 송출 상태가 아니라 현재 인증 가능 여부만 표시한다.
-=========
             {
                 _logService.WriteException("방화벽 정책 적용 오류", ex);
             }
         }
 
         /// <summary>
->>>>>>>>> Temporary merge branch 2
         /// 현재 로컬 인증 등록 상태를 확인하고 트레이 인증상태 표시를 갱신한다.
         /// 
         /// 이 메서드는 인증서버 Verify를 호출하지 않는다.
@@ -424,23 +401,6 @@ namespace pccam_32.Presenters
         private void RefreshAuthStatus()
         {
             try
-<<<<<<<<< Temporary merge branch 1
-                AuthResult authResult = _authDllAdapter.CheckCanRun(_config.Auth);
-
-                if (authResult != null && authResult.CanRun)
-                {
-                    _view.SetAuthStatusText("인증됨");
-                    _logService.WriteAuth("인증 상태 확인: 인증됨");
-                }
-                else
-                {
-                    string message = authResult == null
-                        ? "인증 결과 없음"
-                        : authResult.Message;
-
-                    _view.SetAuthStatusText("미인증");
-                    _logService.WriteAuth("인증 상태 확인: 미인증 - " + message);
-=========
             {
                 if (_config == null)
                     _config = _configService.Load();
@@ -453,28 +413,22 @@ namespace pccam_32.Presenters
                 if (hasLocalAuth)
                 {
                     _view.SetAuthStatusText("인증됨");
-                    string message = authResult == null
-                        ? "인증 결과 없음"
-                        : authResult.Message;
-
+                    _logService.WriteAuth("인증 상태 확인: 로컬 인증정보 있음");
+                }
+                else
+                {
                     _view.SetAuthStatusText("미인증");
                     _logService.WriteAuth("인증 상태 확인: 로컬 인증정보 없음");
                 }
             }
-                return false;
+            catch (Exception ex)
+            {
+                _view.SetAuthStatusText("인증 오류");
+                _logService.WriteException("인증 상태 확인 오류", ex);
             }
         }
 
         /// <summary>
-=========
->>>>>>>>> Temporary merge branch 2
-                return false;
-            }
-        }
-
-        /// <summary>
-=========
->>>>>>>>> Temporary merge branch 2
         /// 내부 송출 시작을 수행한다.
         /// 
         /// 사용자가 트레이에서 직접 호출하지 않는다.
