@@ -34,7 +34,7 @@ namespace pccam_32.Presenters
         private SettingView _settingView;
         private SettingPresenter _settingPresenter;
         private bool _disposed;
-        private TrayApplicationContext trayView;
+        //private TrayApplicationContext trayView;
         private readonly FirewallService _firewallService;
 
         public TrayPresenter(
@@ -97,7 +97,7 @@ namespace pccam_32.Presenters
 
         public TrayPresenter(TrayApplicationContext trayView, PathProvider pathProvider, ConfigService configService, StreamSupervisorService supervisor, AuthDllAdapter authDllAdapter, PowerPolicyService powerPolicyService, LogService logService)
         {
-            this.trayView = trayView;
+            //this.trayView = trayView;
             _pathProvider = pathProvider;
             _configService = configService;
             _supervisor = supervisor;
@@ -109,16 +109,9 @@ namespace pccam_32.Presenters
         /// <summary>
         /// 트레이 Presenter를 초기화한다.
         /// 
-        /// 처리 순서:
-        /// 1. 설정 파일 로드
-        /// 2. 트레이 기본 상태 표시
-        /// 3. 운영 정책 적용
-        /// 4. 로컬 인증 등록 상태 표시
-        /// 5. 로컬 인증정보가 있고 자동 송출 설정이 켜져 있으면 송출 시작 요청
-        /// 
-        /// 주의:
         /// 이 단계에서는 인증서버 Verify를 호출하지 않는다.
-        /// 실제 서버 인증은 StreamSupervisorService.Start()에서 송출 시작 직전에 1회만 수행한다.
+        /// 트레이에는 로컬 인증정보 존재 여부만 표시하고,
+        /// 실제 서버 인증은 StreamSupervisorService.Start()에서 송출 시작 직전에 수행한다.
         /// </summary>
         private void Initialize()
         {
@@ -134,8 +127,7 @@ namespace pccam_32.Presenters
                 ApplyOperationPolicy();
 
                 /*
-                 * 트레이 표시는 서버 인증이 아니라 로컬 인증 등록 여부만 확인한다.
-                 * 서버 인증은 송출 시작 시 StreamSupervisorService.Start()에서 수행한다.
+                 * 서버 인증이 아니라 로컬 인증 등록 여부만 확인한다.
                  */
                 RefreshAuthStatus();
 
@@ -159,6 +151,7 @@ namespace pccam_32.Presenters
                 _view.SetAuthStatusText("인증 오류");
                 _view.SetStatusText("PC CAM - 오류");
                 _view.ShowError("프로그램 초기화 중 오류가 발생했습니다.\r\n" + ex.Message);
+
                 _logService.WriteException("TrayPresenter 초기화 오류", ex);
             }
         }
