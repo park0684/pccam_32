@@ -109,9 +109,21 @@ namespace pccam_32.Presenters
         /// <summary>
         /// 트레이 Presenter를 초기화한다.
         /// 
-        /// 이 단계에서는 인증서버 Verify를 호출하지 않는다.
+        /// 4. 로컬 인증 등록 상태 표시
+        /// 5. 로컬 인증정보가 있고 자동 송출 설정이 켜져 있으면 송출 시작 요청
+        /// 
+        /// 주의:
+        /// 4. 로컬 인증 등록 상태 표시
         /// 트레이에는 로컬 인증정보 존재 여부만 표시하고,
         /// 실제 서버 인증은 StreamSupervisorService.Start()에서 송출 시작 직전에 수행한다.
+        /// 주의:
+        /// 4. 로컬 인증 등록 상태 표시
+        /// 실제 서버 인증은 StreamSupervisorService.Start()에서 송출 시작 직전에 1회만 수행한다.
+>>>>>>>>> Temporary merge branch 2
+        /// 주의:
+        /// 이 단계에서는 인증서버 Verify를 호출하지 않는다.
+        /// 실제 서버 인증은 StreamSupervisorService.Start()에서 송출 시작 직전에 1회만 수행한다.
+>>>>>>>>> Temporary merge branch 2
         /// </summary>
         private void Initialize()
         {
@@ -391,12 +403,19 @@ namespace pccam_32.Presenters
                 _logService.WriteApp("방화벽 정책 적용 완료");
             }
             catch (Exception ex)
+<<<<<<<<< Temporary merge branch 1
+        /// <summary>
+        /// 현재 인증 상태를 다시 확인하고 트레이 인증상태 표시를 갱신한다.
+        /// 
+        /// 인증상태 메뉴는 송출 상태가 아니라 현재 인증 가능 여부만 표시한다.
+=========
             {
                 _logService.WriteException("방화벽 정책 적용 오류", ex);
             }
         }
 
         /// <summary>
+>>>>>>>>> Temporary merge branch 2
         /// 현재 로컬 인증 등록 상태를 확인하고 트레이 인증상태 표시를 갱신한다.
         /// 
         /// 이 메서드는 인증서버 Verify를 호출하지 않는다.
@@ -405,6 +424,23 @@ namespace pccam_32.Presenters
         private void RefreshAuthStatus()
         {
             try
+<<<<<<<<< Temporary merge branch 1
+                AuthResult authResult = _authDllAdapter.CheckCanRun(_config.Auth);
+
+                if (authResult != null && authResult.CanRun)
+                {
+                    _view.SetAuthStatusText("인증됨");
+                    _logService.WriteAuth("인증 상태 확인: 인증됨");
+                }
+                else
+                {
+                    string message = authResult == null
+                        ? "인증 결과 없음"
+                        : authResult.Message;
+
+                    _view.SetAuthStatusText("미인증");
+                    _logService.WriteAuth("인증 상태 확인: 미인증 - " + message);
+=========
             {
                 if (_config == null)
                     _config = _configService.Load();
@@ -417,22 +453,28 @@ namespace pccam_32.Presenters
                 if (hasLocalAuth)
                 {
                     _view.SetAuthStatusText("인증됨");
-                    _logService.WriteAuth("인증 상태 확인: 로컬 인증정보 있음");
-                }
-                else
-                {
+                    string message = authResult == null
+                        ? "인증 결과 없음"
+                        : authResult.Message;
+
                     _view.SetAuthStatusText("미인증");
                     _logService.WriteAuth("인증 상태 확인: 로컬 인증정보 없음");
                 }
             }
-            catch (Exception ex)
-            {
-                _view.SetAuthStatusText("인증 오류");
-                _logService.WriteException("인증 상태 확인 오류", ex);
+                return false;
             }
         }
 
         /// <summary>
+=========
+>>>>>>>>> Temporary merge branch 2
+                return false;
+            }
+        }
+
+        /// <summary>
+=========
+>>>>>>>>> Temporary merge branch 2
         /// 내부 송출 시작을 수행한다.
         /// 
         /// 사용자가 트레이에서 직접 호출하지 않는다.
