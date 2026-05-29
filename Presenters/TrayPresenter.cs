@@ -159,6 +159,7 @@ namespace pccam_32.Presenters
                 _view.SetAuthStatusText("인증 오류");
                 _view.SetStatusText("PC CAM - 오류");
                 _view.ShowError("프로그램 초기화 중 오류가 발생했습니다.\r\n" + ex.Message);
+
                 _logService.WriteException("TrayPresenter 초기화 오류", ex);
             }
         }
@@ -428,6 +429,10 @@ namespace pccam_32.Presenters
                 }
                 else
                 {
+                    string message = authResult == null
+                        ? "인증 결과 없음"
+                        : authResult.Message;
+
                     _view.SetAuthStatusText("미인증");
                     _logService.WriteAuth("인증 상태 확인: 로컬 인증정보 없음");
                 }
@@ -436,6 +441,33 @@ namespace pccam_32.Presenters
             {
                 _view.SetAuthStatusText("인증 오류");
                 _logService.WriteException("인증 상태 확인 오류", ex);
+            }
+        }
+
+        /// <summary>
+        /// 현재 설정 기준으로 인증이 유효한지 확인한다.
+        /// 
+        /// 내부 자동 송출 여부를 판단할 때 사용한다.
+        /// </summary>
+        /// <returns>
+        /// true: 인증 유효
+        /// false: 인증 실패 또는 오류
+        /// </returns>
+        private bool IsCurrentAuthValid()
+        {
+            try
+            {
+                if (_config == null)
+                    _config = _configService.Load();
+
+                AuthResult authResult = _authDllAdapter.CheckCanRun(_config.Auth);
+
+                return authResult != null && authResult.CanRun;
+            }
+            catch (Exception ex)
+            {
+                _logService.WriteException("인증 유효성 확인 오류", ex);
+                return false;
             }
         }
 
