@@ -104,7 +104,8 @@ namespace pccam_32.Views
 
                     result.Add(new StreamConfig
                     {
-                        IsEnabled = _chkUse[i].Checked,
+                        //IsEnabled = _chkUse[i].Checked,
+                        IsEnabled = _chkUse[i].Checked && HasScreenForStream(i),
                         StreamNo = i,
 
                         /*
@@ -112,7 +113,8 @@ namespace pccam_32.Views
                          * 기존 설정값을 그대로 유지한다.
                          */
                         MonitorRole = source == null ? GetDefaultMonitorRole(i) : source.MonitorRole,
-                        ScreenName = source == null ? "" : source.ScreenName,
+                        //ScreenName = source == null ? "" : source.ScreenName,
+                        ScreenName = ResolveScreenName(source, i),
 
                         DisplayName = _txtDisplayName[i].Text.Trim(),
                         OnvifPort = ToInt(_txtOnvifPort[i].Text, i == 0 ? 8080 : 8081),
@@ -693,6 +695,75 @@ namespace pccam_32.Views
                 return "Secondary";
 
             return "Monitor" + streamNo;
+        }
+
+        /// <summary>
+        /// Stream 순번에 해당하는 모니터가 현재 PC에 존재하는지 확인한다.
+        /// </summary>
+        private bool HasScreenForStream(int streamNo)
+        {
+            return streamNo >= 0 && streamNo < Screen.AllScreens.Length;
+        }
+
+        /// <summary>
+        /// Stream 설정에 사용할 Windows 모니터 장치명을 반환한다.
+        /// 
+        /// 기존 ScreenName이 현재 PC에 존재하면 그대로 사용하고,
+        /// 없거나 비어 있으면 현재 모니터 목록 기준으로 자동 지정한다.
+        /// </summary>
+        private string ResolveScreenName(StreamConfig source, int streamNo)
+        {
+            if (source != null &&
+                !string.IsNullOrWhiteSpace(source.ScreenName) &&
+                ExistsScreenName(source.ScreenName))
+            {
+                return source.ScreenName;
+            }
+
+            Screen screen = GetScreenByStreamNo(streamNo);
+
+            if (screen == null)
+                return "";
+
+            return screen.DeviceName;
+        }
+
+        /// <summary>
+        /// 지정한 ScreenName이 현재 PC 모니터 목록에 존재하는지 확인한다.
+        /// </summary>
+        private bool ExistsScreenName(string screenName)
+        {
+            if (string.IsNullOrWhiteSpace(screenName))
+                return false;
+
+            foreach (Screen screen in Screen.AllScreens)
+            {
+                if (string.Equals(
+                    screen.DeviceName,
+                    screenName,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// StreamNo 기준으로 현재 PC 모니터를 반환한다.
+        /// 
+        /// 현재는 Screen.AllScreens 순서를 사용한다.
+        /// </summary>
+        private Screen GetScreenByStreamNo(int streamNo)
+        {
+            if (streamNo < 0)
+                return null;
+
+            if (streamNo >= Screen.AllScreens.Length)
+                return null;
+
+            return Screen.AllScreens[streamNo];
         }
     }
 }

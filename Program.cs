@@ -90,7 +90,8 @@ namespace pccam_32
                  * LogService는 다른 서비스에서 사용되므로 초반에 생성한다.
                  */
                 pathProvider = new PathProvider();
-                configService = new ConfigService(pathProvider);
+                monitorService = new MonitorService();
+                configService = new ConfigService(pathProvider, monitorService);
                 logService = new LogService(pathProvider);
 
                 logService.WriteApp("PC CAM 프로그램 시작");

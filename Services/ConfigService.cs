@@ -1,8 +1,9 @@
-﻿using System;
+﻿using pccam_32.Infrastructure;
+using pccam_32.Models;
+using System;
 using System.Collections.Generic;
 using System.IO;
-using pccam_32.Infrastructure;
-using pccam_32.Models;
+using System.Text;
 
 namespace pccam_32.Services
 {
@@ -15,13 +16,20 @@ namespace pccam_32.Services
     public class ConfigService
     {
         private readonly PathProvider _pathProvider;
+        private readonly MonitorService _monitorService;
 
-        public ConfigService(PathProvider pathProvider)
+        public ConfigService(
+            PathProvider pathProvider,
+            MonitorService monitorService)
         {
             if (pathProvider == null)
                 throw new ArgumentNullException("pathProvider");
 
+            if (monitorService == null)
+                throw new ArgumentNullException("monitorService");
+
             _pathProvider = pathProvider;
+            _monitorService = monitorService;
         }
 
         /// <summary>
@@ -34,23 +42,30 @@ namespace pccam_32.Services
         {
             _pathProvider.EnsureDirectories();
 
+            /*
+             * IniFileHelper 생성자에서 파일이 자동 생성될 수 있으므로,
+             * 파일 존재 여부는 Helper 생성 전에 확인한다.
+             */
+            bool configFileExists = File.Exists(_pathProvider.AppConfigFilePath);
+
             IniFileHelper ini = new IniFileHelper(_pathProvider.AppConfigFilePath);
 
-            if (!ini.Exists())
+            if (!configFileExists || IsConfigFileEmpty())
             {
                 AppConfig defaultConfig = AppConfig.CreateDefault();
+
+                /*
+                 * 최초 설치/최초 실행 시에는 ScreenName이 비어 있을 수 있으므로
+                 * 현재 PC 모니터 기준으로 자동 보정한다.
+                 */
+                NormalizeMonitorBindings(defaultConfig);
+
                 Save(defaultConfig);
                 return defaultConfig;
             }
 
             AppConfig config = AppConfig.CreateDefault();
 
-            /*
-             * AppConfig.CreateDefault()에서 생성된 기본 Stream 목록을 비우고,
-             * 실제 INI 파일에 존재하는 Stream 섹션을 다시 로드한다.
-             * 
-             * 기존 방식처럼 Stream0, Stream1만 고정 로드하지 않는다.
-             */
             if (config.Streams == null)
                 config.Streams = new List<StreamConfig>();
             else
@@ -65,6 +80,17 @@ namespace pccam_32.Services
             LoadAuth(ini, config);
             LoadOperation(ini, config);
             LoadRtspServer(ini, config);
+
+            /*
+             * 기존 설정 파일에 ScreenName이 비어 있거나,
+             * 현재 PC에 존재하지 않는 모니터 장치명이 저장되어 있으면 보정한다.
+             */
+            NormalizeMonitorBindings(config);
+
+            /*
+             * 보정된 ScreenName을 설정 파일에 반영한다.
+             */
+            Save(config);
 
             return config;
         }
@@ -86,6 +112,13 @@ namespace pccam_32.Services
 
             if (config.Streams == null || config.Streams.Count == 0)
                 config.Streams = AppConfig.CreateDefault().Streams;
+
+            /*
+             * 설정 화면에서 ScreenName을 표시하지 않기 때문에,
+             * 저장 직전에도 반드시 현재 PC 모니터 기준으로 보정한다.
+             */
+            NormalizeMonitorBindings(config);
+
 
             for (int i = 0; i < config.Streams.Count; i++)
             {
@@ -423,15 +456,7 @@ namespace pccam_32.Services
         /// <summary>
         /// INI 파일의 섹션 사이에 빈 줄을 넣어 가독성을 높인다.
         /// 
-        /// 예:
-        /// [Stream0]
-        /// ...
-        /// 
-        /// [Stream1]
-        /// ...
-        /// 
-        /// [Onvif]
-        /// ...
+        /// 파일 인코딩은 UTF-8 BOM으로 유지한다.
         /// </summary>
         private void FormatIniSectionSpacing()
         {
@@ -443,7 +468,9 @@ namespace pccam_32.Services
             if (!File.Exists(filePath))
                 return;
 
-            string[] lines = File.ReadAllLines(filePath);
+            Encoding utf8WithBom = new UTF8Encoding(true);
+
+            string[] lines = File.ReadAllLines(filePath, utf8WithBom);
 
             List<string> formatted = new List<string>();
             bool hasWrittenLine = false;
@@ -472,7 +499,7 @@ namespace pccam_32.Services
                 previousLineWasBlank = false;
             }
 
-            File.WriteAllLines(filePath, formatted.ToArray());
+            File.WriteAllLines(filePath, formatted.ToArray(), utf8WithBom);
         }
 
         /// <summary>
@@ -519,6 +546,149 @@ namespace pccam_32.Services
              * 기존에 Stream1.Sub가 poscam_sub로 잘못 저장된 경우를 보정한다.
              */
             stream.SubStream.RtspPath = basePath + "_sub";
+        }
+
+        /// <summary>
+        /// 설정 파일이 비어 있는지 확인한다.
+        /// 
+        /// IniFileHelper가 파일을 자동 생성한 경우,
+        /// 파일은 존재하지만 내용이 없을 수 있다.
+        /// 이 경우 기본 설정을 저장해야 한다.
+        /// </summary>
+        private bool IsConfigFileEmpty()
+        {
+            string filePath = _pathProvider.AppConfigFilePath;
+
+            if (string.IsNullOrWhiteSpace(filePath))
+                return true;
+
+            if (!File.Exists(filePath))
+                return true;
+
+            FileInfo fileInfo = new FileInfo(filePath);
+
+            return fileInfo.Length == 0;
+        }
+
+        /// <summary>
+        /// 현재 PC에 연결된 모니터 기준으로 StreamConfig.ScreenName을 보정한다.
+        /// 
+        /// ScreenName은 사용자가 입력하는 표시명이 아니라
+        /// Windows 모니터 장치명이다.
+        /// 예: \\.\DISPLAY1
+        /// 
+        /// 설정 화면에서는 ScreenName을 숨겼으므로,
+        /// 설정 로드/저장 시점에 서비스에서 자동 보정한다.
+        /// </summary>
+        private void NormalizeMonitorBindings(AppConfig config)
+        {
+            if (config == null || config.Streams == null)
+                return;
+
+            List<MonitorInfo> monitors = _monitorService.GetMonitors();
+
+            for (int i = 0; i < config.Streams.Count; i++)
+            {
+                StreamConfig stream = config.Streams[i];
+
+                if (stream == null)
+                    continue;
+
+                stream.StreamNo = i;
+                stream.MonitorRole = GetDefaultMonitorRole(i);
+
+                /*
+                 * 현재 PC의 모니터 수보다 Stream 수가 많으면
+                 * 해당 Stream은 실제 송출할 수 없으므로 비활성화한다.
+                 */
+                if (i >= monitors.Count)
+                {
+                    stream.IsEnabled = false;
+                    stream.ScreenName = "";
+                    DisableQualityStreams(stream);
+                    continue;
+                }
+
+                MonitorInfo monitor = monitors[i];
+
+                /*
+                 * ScreenName이 비어 있거나 현재 PC에 존재하지 않는 값이면
+                 * 현재 모니터 기준으로 다시 지정한다.
+                 */
+                if (string.IsNullOrWhiteSpace(stream.ScreenName) ||
+                    !ContainsMonitor(monitors, stream.ScreenName))
+                {
+                    stream.ScreenName = monitor.DeviceName;
+                }
+
+                if (string.IsNullOrWhiteSpace(stream.DisplayName))
+                    stream.DisplayName = GetDefaultDisplayName(i);
+            }
+        }
+
+        /// <summary>
+        /// 현재 모니터 목록에 지정한 DeviceName이 존재하는지 확인한다.
+        /// </summary>
+        private bool ContainsMonitor(List<MonitorInfo> monitors, string deviceName)
+        {
+            if (monitors == null || string.IsNullOrWhiteSpace(deviceName))
+                return false;
+
+            foreach (MonitorInfo monitor in monitors)
+            {
+                if (string.Equals(
+                    monitor.DeviceName,
+                    deviceName,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// StreamNo 기준 기본 MonitorRole 값을 반환한다.
+        /// </summary>
+        private string GetDefaultMonitorRole(int streamNo)
+        {
+            if (streamNo == 0)
+                return "Primary";
+
+            if (streamNo == 1)
+                return "Secondary";
+
+            return "Monitor" + streamNo;
+        }
+
+        /// <summary>
+        /// StreamNo 기준 기본 표시명을 반환한다.
+        /// </summary>
+        private string GetDefaultDisplayName(int streamNo)
+        {
+            if (streamNo == 0)
+                return "주 모니터";
+
+            if (streamNo == 1)
+                return "보조 모니터";
+
+            return "모니터 " + streamNo;
+        }
+
+        /// <summary>
+        /// 부모 Stream이 비활성화될 때 Main/Sub Stream도 함께 비활성화한다.
+        /// </summary>
+        private void DisableQualityStreams(StreamConfig stream)
+        {
+            if (stream == null)
+                return;
+
+            if (stream.MainStream != null)
+                stream.MainStream.IsEnabled = false;
+
+            if (stream.SubStream != null)
+                stream.SubStream.IsEnabled = false;
         }
     }
 }
