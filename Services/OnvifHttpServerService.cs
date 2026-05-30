@@ -299,6 +299,20 @@ namespace pccam_32.Services
                         ", Host=" +
                         host);
 
+                    if (string.Equals(actionName, "GetProfiles", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _logService.WriteApp("ONVIF GetProfiles 요청 수신");
+                    }
+
+                    if (string.Equals(actionName, "GetStreamUri", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string profileToken = ExtractProfileTokenForLog(request.Body);
+
+                        _logService.WriteApp(
+                            "ONVIF GetStreamUri 요청 수신. ProfileToken=" +
+                            profileToken);
+                    }
+
                     if (string.Equals(actionName, "Unknown", StringComparison.OrdinalIgnoreCase))
                     {
                         _logService.WriteApp(
@@ -314,15 +328,16 @@ namespace pccam_32.Services
                         host,
                         _listeningPort);
 
-                    WriteSoapResponse(stream, responseXml);
+                    if (string.Equals(actionName, "GetStreamUri", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string rtspUri = ExtractRtspUriForLog(responseXml);
 
-                    _logService.WriteApp(
-                        "ONVIF 요청 처리 완료. Action=" +
-                        actionName +
-                        ", Path=" +
-                        request.Path +
-                        ", Host=" +
-                        host);
+                        _logService.WriteApp(
+                            "ONVIF GetStreamUri 응답. RtspUri=" +
+                            rtspUri);
+                    }
+
+                    WriteSoapResponse(stream, responseXml);
                 }
             }
             catch (Exception ex)
@@ -331,6 +346,91 @@ namespace pccam_32.Services
             }
         }
 
+        /// <summary>
+        /// ONVIF GetStreamUri 요청 XML에서 ProfileToken 값을 로그용으로 추출한다.
+        /// 
+        /// 지원 형태:
+        /// - <ProfileToken>profile_0_main</ProfileToken>
+        /// - <trt:ProfileToken>profile_0_sub</trt:ProfileToken>
+        /// </summary>
+        /// <param name="requestBody">
+        /// ONVIF SOAP 요청 본문.
+        /// </param>
+        /// <returns>
+        /// ProfileToken 값.
+        /// 찾지 못하면 빈 문자열.
+        /// </returns>
+        private string ExtractProfileTokenForLog(string requestBody)
+        {
+            if (string.IsNullOrWhiteSpace(requestBody))
+                return "";
+
+            string elementName = "ProfileToken";
+
+            int nameIndex = requestBody.IndexOf(
+                elementName,
+                StringComparison.OrdinalIgnoreCase);
+
+            if (nameIndex < 0)
+                return "";
+
+            int startCloseIndex = requestBody.IndexOf(
+                ">",
+                nameIndex,
+                StringComparison.OrdinalIgnoreCase);
+
+            if (startCloseIndex < 0)
+                return "";
+
+            int valueStartIndex = startCloseIndex + 1;
+
+            int endIndex = requestBody.IndexOf(
+                "</",
+                valueStartIndex,
+                StringComparison.OrdinalIgnoreCase);
+
+            if (endIndex < 0 || endIndex <= valueStartIndex)
+                return "";
+
+            return requestBody
+                .Substring(valueStartIndex, endIndex - valueStartIndex)
+                .Trim();
+        }
+
+        /// <summary>
+        /// ONVIF GetStreamUri 응답 XML에서 RTSP URI를 로그용으로 추출한다.
+        /// </summary>
+        /// <param name="responseXml">
+        /// ONVIF SOAP 응답 XML.
+        /// </param>
+        /// <returns>
+        /// RTSP URI.
+        /// 찾지 못하면 빈 문자열.
+        /// </returns>
+        private string ExtractRtspUriForLog(string responseXml)
+        {
+            if (string.IsNullOrWhiteSpace(responseXml))
+                return "";
+
+            int startIndex = responseXml.IndexOf(
+                "rtsp://",
+                StringComparison.OrdinalIgnoreCase);
+
+            if (startIndex < 0)
+                return "";
+
+            int endIndex = responseXml.IndexOf(
+                "<",
+                startIndex,
+                StringComparison.OrdinalIgnoreCase);
+
+            if (endIndex < 0 || endIndex <= startIndex)
+                return responseXml.Substring(startIndex).Trim();
+
+            return responseXml
+                .Substring(startIndex, endIndex - startIndex)
+                .Trim();
+        }
         /// <summary>
         /// HTTP 요청을 읽어 OnvifHttpRequest 객체로 변환한다.
         /// 

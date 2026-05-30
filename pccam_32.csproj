@@ -107,6 +107,7 @@
     <Compile Include="Models\RtspServerConfig.cs" />
     <Compile Include="Models\StartupValidationResult.cs" />
     <Compile Include="Models\StreamConfig.cs" />
+    <Compile Include="Models\StreamQualityConfig.cs" />
     <Compile Include="Models\StreamRuntimeStatus.cs" />
     <Compile Include="Presenters\SettingPresenter.cs" />
     <Compile Include="Presenters\TrayPresenter.cs" />

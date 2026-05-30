@@ -27,10 +27,6 @@ namespace pccam_32.Services
 
         /// <summary>
         /// ONVIF SOAP 요청 문자열을 분석하고 응답 XML을 반환한다.
-        /// 
-        /// 현재는 XML 파서를 사용하지 않고 요청 문자열에 포함된 동작명을 기준으로 분기한다.
-        /// 초기 호환성 테스트 단계에서는 이 방식으로 충분하며,
-        /// 이후 WS-Security나 정확한 SOAP Header 처리가 필요해지면 XML 파서 기반으로 확장한다.
         /// </summary>
         /// <param name="requestBody">HTTP 요청 본문 SOAP XML.</param>
         /// <param name="config">현재 PC CAM 설정.</param>
@@ -67,7 +63,24 @@ namespace pccam_32.Services
                 return _responseBuilder.BuildGetProfilesResponse(config);
 
             if (string.Equals(actionName, "GetStreamUri", StringComparison.OrdinalIgnoreCase))
-                return _responseBuilder.BuildGetStreamUriResponse(config, host, 0);
+            {
+                /*
+                 * NVR은 GetProfiles에서 받은 ProfileToken을 다시 GetStreamUri 요청에 넣어 보낸다.
+                 * 예:
+                 * profile_0_main
+                 * profile_0_sub
+                 * profile_1_main
+                 * profile_1_sub
+                 * 
+                 * 이 값을 기준으로 Main/Sub RTSP URL을 다르게 반환해야 한다.
+                 */
+                string profileToken = ExtractProfileToken(requestBody);
+
+                return _responseBuilder.BuildGetStreamUriResponse(
+                    config,
+                    host,
+                    profileToken);
+            }
 
             return _responseBuilder.BuildSoapFault("지원하지 않는 ONVIF 요청입니다.");
         }
@@ -78,11 +91,11 @@ namespace pccam_32.Services
         /// 네임스페이스 prefix가 tds, trt, 또는 임의 값일 수 있으므로
         /// 단순히 동작명 문자열 포함 여부로 판단한다.
         /// </summary>
-        /// <param name="requestBody">요청 SOAP XML 문자열.</param>
-        /// <param name="actionName">확인할 ONVIF 동작명.</param>
-        /// <returns>true이면 해당 동작명이 포함됨.</returns>
         private bool ContainsAction(string requestBody, string actionName)
         {
+            if (string.IsNullOrWhiteSpace(requestBody))
+                return false;
+
             return requestBody.IndexOf(actionName, StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
@@ -91,18 +104,7 @@ namespace pccam_32.Services
         /// 
         /// 현재 구현은 XML 파서를 사용하지 않고,
         /// 지원 대상 ONVIF 액션명이 요청 본문에 포함되어 있는지 확인한다.
-        /// 
-        /// NVR 제조사마다 namespace prefix가 다를 수 있으므로
-        /// tds:GetProfiles, trt:GetProfiles처럼 prefix까지 비교하지 않고
-        /// 액션명 문자열 포함 여부로 판단한다.
         /// </summary>
-        /// <param name="requestBody">
-        /// HTTP 요청 본문 SOAP XML.
-        /// </param>
-        /// <returns>
-        /// 확인된 ONVIF 액션명.
-        /// 지원하지 않는 요청이면 Unknown을 반환한다.
-        /// </returns>
         public string GetActionName(string requestBody)
         {
             if (string.IsNullOrWhiteSpace(requestBody))
@@ -130,6 +132,111 @@ namespace pccam_32.Services
                 return "GetStreamUri";
 
             return "Unknown";
+        }
+
+        /// <summary>
+        /// GetStreamUri 요청 본문에서 ProfileToken 값을 추출한다.
+        /// 
+        /// XML 파서를 사용하지 않고 문자열 기준으로 처리한다.
+        /// 일반적인 요청 형태:
+        /// <trt:ProfileToken>profile_0_main</trt:ProfileToken>
+        /// <ProfileToken>profile_0_sub</ProfileToken>
+        /// </summary>
+        /// <param name="requestBody">
+        /// HTTP 요청 본문 SOAP XML.
+        /// </param>
+        /// <returns>
+        /// ProfileToken 값.
+        /// 찾지 못하면 profile_0_main을 반환한다.
+        /// </returns>
+        private string ExtractProfileToken(string requestBody)
+        {
+            if (string.IsNullOrWhiteSpace(requestBody))
+                return "profile_0_main";
+
+            string token = ExtractXmlElementValue(requestBody, "ProfileToken");
+
+            if (string.IsNullOrWhiteSpace(token))
+                return "profile_0_main";
+
+            return token.Trim();
+        }
+
+        /// <summary>
+        /// XML 문자열에서 특정 태그의 값을 단순 문자열 방식으로 추출한다.
+        /// 
+        /// namespace prefix가 있을 수 있으므로 아래 두 형태를 모두 고려한다.
+        /// - <ProfileToken>...</ProfileToken>
+        /// - <trt:ProfileToken>...</trt:ProfileToken>
+        /// </summary>
+        /// <param name="xml">
+        /// XML 문자열.
+        /// </param>
+        /// <param name="elementName">
+        /// 찾을 태그명.
+        /// </param>
+        /// <returns>
+        /// 태그 내부 값.
+        /// 찾지 못하면 빈 문자열.
+        /// </returns>
+        private string ExtractXmlElementValue(string xml, string elementName)
+        {
+            if (string.IsNullOrWhiteSpace(xml))
+                return "";
+
+            if (string.IsNullOrWhiteSpace(elementName))
+                return "";
+
+            /*
+             * 1. prefix 없는 형태 우선 검색.
+             */
+            string directStartTag = "<" + elementName + ">";
+            string directEndTag = "</" + elementName + ">";
+
+            string value = ExtractBetween(xml, directStartTag, directEndTag);
+
+            if (!string.IsNullOrWhiteSpace(value))
+                return value;
+
+            /*
+             * 2. namespace prefix가 있는 형태 검색.
+             * 예: <trt:ProfileToken>...</trt:ProfileToken>
+             */
+            string startPattern = ":" + elementName + ">";
+
+            int startIndex = xml.IndexOf(startPattern, StringComparison.OrdinalIgnoreCase);
+
+            if (startIndex < 0)
+                return "";
+
+            startIndex = startIndex + startPattern.Length;
+
+            int endIndex = xml.IndexOf("</", startIndex, StringComparison.OrdinalIgnoreCase);
+
+            if (endIndex < 0 || endIndex <= startIndex)
+                return "";
+
+            return xml.Substring(startIndex, endIndex - startIndex);
+        }
+
+        /// <summary>
+        /// 문자열에서 시작 태그와 종료 태그 사이의 값을 추출한다.
+        /// </summary>
+        private string ExtractBetween(string source, string startText, string endText)
+        {
+            int startIndex = source.IndexOf(startText, StringComparison.OrdinalIgnoreCase);
+
+            if (startIndex < 0)
+                return "";
+
+            startIndex += startText.Length;
+
+            int endIndex = source.IndexOf(endText, startIndex, StringComparison.OrdinalIgnoreCase);
+
+            if (endIndex < 0 || endIndex <= startIndex)
+                return "";
+
+            return source.Substring(startIndex, endIndex - startIndex);
         }
     }
 }

@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
 using pccam_32.Infrastructure;
 using pccam_32.Models;
@@ -11,19 +12,29 @@ namespace pccam_32.Services
     /// 역할:
     /// 1. FFmpeg 실행 파일 존재 여부 확인
     /// 2. StreamConfig + MonitorInfo + RtspServerConfig 기준으로 FFmpeg 명령 생성
-    /// 3. FFmpeg 프로세스 실행
+    /// 3. StreamNo별 FFmpeg 프로세스 실행
     /// 4. FFmpeg 로그 수신
-    /// 5. FFmpeg 종료 처리
+    /// 5. FFmpeg 전체 종료 처리
     /// 
-    /// 주의:
-    /// FFmpeg는 정상 실행 중에도 진행 로그를 stderr로 출력한다.
-    /// 따라서 ErrorReceived 로그가 있다고 해서 무조건 오류로 판단하면 안 된다.
+    /// 다중 모니터 구조:
+    /// - Stream0 → FFmpeg 프로세스 1개
+    /// - Stream1 → FFmpeg 프로세스 1개
+    /// - Stream2 → FFmpeg 프로세스 1개
+    /// 
+    /// 각 FFmpeg 프로세스는 해당 모니터의 Main/Sub RTSP 출력을 담당한다.
     /// </summary>
     public class FfmpegService : IDisposable
     {
+        private readonly object _syncLock = new object();
+
         private readonly PathProvider _pathProvider;
         private readonly FfmpegCommandBuilder _commandBuilder;
-        private readonly ProcessRunner _processRunner;
+
+        /*
+         * 기존에는 ProcessRunner 1개만 사용했다.
+         * 다중 모니터 송출을 위해 StreamNo별 ProcessRunner를 관리한다.
+         */
+        private readonly Dictionary<int, FfmpegProcessSlot> _processSlots;
 
         private bool _disposed;
 
@@ -35,6 +46,9 @@ namespace pccam_32.Services
 
         /// <summary>
         /// FFmpeg 종료 이벤트.
+        /// 
+        /// 기존 StreamSupervisorService와의 호환성을 위해 exitCode만 전달한다.
+        /// 어떤 StreamNo가 종료되었는지는 로그에 함께 기록한다.
         /// </summary>
         public event Action<int> Exited;
 
@@ -50,19 +64,56 @@ namespace pccam_32.Services
 
             _pathProvider = pathProvider;
             _commandBuilder = commandBuilder;
-            _processRunner = new ProcessRunner();
-
-            _processRunner.OutputReceived += OnProcessOutputReceived;
-            _processRunner.ErrorReceived += OnProcessErrorReceived;
-            _processRunner.Exited += OnProcessExited;
+            _processSlots = new Dictionary<int, FfmpegProcessSlot>();
         }
 
         /// <summary>
-        /// FFmpeg 실행 여부.
+        /// 하나 이상의 FFmpeg 프로세스가 실행 중인지 여부.
         /// </summary>
         public bool IsRunning
         {
-            get { return _processRunner.IsRunning; }
+            get
+            {
+                lock (_syncLock)
+                {
+                    foreach (KeyValuePair<int, FfmpegProcessSlot> pair in _processSlots)
+                    {
+                        if (pair.Value != null &&
+                            pair.Value.Runner != null &&
+                            pair.Value.Runner.IsRunning)
+                        {
+                            return true;
+                        }
+                    }
+
+                    return false;
+                }
+            }
+        }
+
+        /// <summary>
+        /// 특정 StreamNo의 FFmpeg 프로세스가 실행 중인지 확인한다.
+        /// </summary>
+        /// <param name="streamNo">
+        /// 확인할 Stream 번호.
+        /// </param>
+        /// <returns>
+        /// true: 해당 Stream FFmpeg 실행 중
+        /// false: 실행 중 아님
+        /// </returns>
+        public bool IsStreamRunning(int streamNo)
+        {
+            lock (_syncLock)
+            {
+                FfmpegProcessSlot slot;
+
+                if (!_processSlots.TryGetValue(streamNo, out slot))
+                    return false;
+
+                return slot != null &&
+                       slot.Runner != null &&
+                       slot.Runner.IsRunning;
+            }
         }
 
         /// <summary>
@@ -73,7 +124,8 @@ namespace pccam_32.Services
         /// 2. 스트림 설정 검증
         /// 3. 모니터 정보 검증
         /// 4. FFmpeg Arguments 생성
-        /// 5. ProcessRunner로 실행
+        /// 5. StreamNo별 ProcessRunner 생성
+        /// 6. FFmpeg 실행
         /// </summary>
         public void Start(
             StreamConfig streamConfig,
@@ -95,8 +147,20 @@ namespace pccam_32.Services
             if (!streamConfig.IsEnabled)
                 throw new InvalidOperationException("사용하지 않는 스트림은 송출할 수 없습니다.");
 
-            if (IsRunning)
+            if (streamConfig.StreamNo < 0)
+                throw new InvalidOperationException("StreamNo 값이 올바르지 않습니다. StreamNo=" + streamConfig.StreamNo);
+
+            int streamNo = streamConfig.StreamNo;
+
+            /*
+             * 해당 StreamNo가 이미 실행 중이면 중복 실행하지 않는다.
+             * 단, 다른 StreamNo는 별도 FFmpeg 프로세스로 실행할 수 있다.
+             */
+            if (IsStreamRunning(streamNo))
+            {
+                RaiseLog("[Stream" + streamNo + "] FFmpeg가 이미 실행 중입니다.");
                 return;
+            }
 
             _pathProvider.EnsureDirectories();
 
@@ -114,18 +178,106 @@ namespace pccam_32.Services
                 monitorInfo,
                 rtspServerConfig);
 
-            RaiseLog("FFmpeg 실행 파일: " + ffmpegPath);
-            RaiseLog("FFmpeg 대상 모니터: " + monitorInfo.DisplayText);
-            RaiseLog("FFmpeg 실행 인자: " + arguments);
+            ProcessRunner runner = new ProcessRunner();
 
-            _processRunner.Start(
-                ffmpegPath,
-                arguments,
-                _pathProvider.ExternalDirectory);
+            runner.OutputReceived += delegate (string line)
+            {
+                OnProcessOutputReceived(streamNo, line);
+            };
+
+            runner.ErrorReceived += delegate (string line)
+            {
+                OnProcessErrorReceived(streamNo, line);
+            };
+
+            runner.Exited += delegate (int exitCode)
+            {
+                OnProcessExited(streamNo, exitCode);
+            };
+
+            FfmpegProcessSlot slot = new FfmpegProcessSlot();
+            slot.StreamNo = streamNo;
+            slot.Runner = runner;
+
+            lock (_syncLock)
+            {
+                /*
+                 * 혹시 이전에 같은 StreamNo의 종료된 Runner가 남아 있으면 제거한다.
+                 */
+                if (_processSlots.ContainsKey(streamNo))
+                {
+                    FfmpegProcessSlot oldSlot = _processSlots[streamNo];
+                    _processSlots.Remove(streamNo);
+
+                    DisposeSlot(oldSlot);
+                }
+
+                _processSlots.Add(streamNo, slot);
+            }
+
+            try
+            {
+                RaiseLog("[Stream" + streamNo + "] FFmpeg 실행 파일: " + ffmpegPath);
+                RaiseLog("[Stream" + streamNo + "] FFmpeg 대상 모니터: " + monitorInfo.DisplayText);
+                RaiseLog("[Stream" + streamNo + "] FFmpeg 실행 인자: " + arguments);
+
+                runner.Start(
+                    ffmpegPath,
+                    arguments,
+                    _pathProvider.ExternalDirectory);
+            }
+            catch
+            {
+                lock (_syncLock)
+                {
+                    if (_processSlots.ContainsKey(streamNo))
+                        _processSlots.Remove(streamNo);
+                }
+
+                DisposeSlot(slot);
+
+                throw;
+            }
         }
 
         /// <summary>
-        /// FFmpeg를 종료한다.
+        /// 특정 StreamNo의 FFmpeg를 종료한다.
+        /// </summary>
+        /// <param name="streamNo">
+        /// 종료할 Stream 번호.
+        /// </param>
+        public void Stop(int streamNo)
+        {
+            FfmpegProcessSlot slot = null;
+
+            lock (_syncLock)
+            {
+                if (_processSlots.ContainsKey(streamNo))
+                {
+                    slot = _processSlots[streamNo];
+                    _processSlots.Remove(streamNo);
+                }
+            }
+
+            if (slot == null || slot.Runner == null)
+                return;
+
+            try
+            {
+                if (slot.Runner.IsRunning)
+                {
+                    RaiseLog("[Stream" + streamNo + "] FFmpeg 종료 요청");
+                    slot.Runner.StopFfmpeg();
+                }
+            }
+            finally
+            {
+                DisposeSlot(slot);
+            }
+        }
+
+        /// <summary>
+        /// 실행 중인 모든 FFmpeg를 종료한다.
         /// 
         /// FFmpeg는 q 입력으로 정상 종료를 시도한다.
         /// 정상 종료가 되지 않으면 ProcessRunner에서 강제 종료한다.
@@ -135,20 +287,56 @@ namespace pccam_32.Services
             if (_disposed)
                 return;
 
-            if (!IsRunning)
+            List<FfmpegProcessSlot> slots = new List<FfmpegProcessSlot>();
+
+            lock (_syncLock)
+            {
+                foreach (KeyValuePair<int, FfmpegProcessSlot> pair in _processSlots)
+                {
+                    if (pair.Value != null)
+                        slots.Add(pair.Value);
+                }
+
+                _processSlots.Clear();
+            }
+
+            if (slots.Count == 0)
                 return;
 
-            RaiseLog("FFmpeg 종료 요청");
+            RaiseLog("FFmpeg 전체 종료 요청. Count=" + slots.Count);
 
-            _processRunner.StopFfmpeg();
+            for (int i = 0; i < slots.Count; i++)
+            {
+                FfmpegProcessSlot slot = slots[i];
+
+                if (slot == null || slot.Runner == null)
+                    continue;
+
+                try
+                {
+                    if (slot.Runner.IsRunning)
+                    {
+                        RaiseLog("[Stream" + slot.StreamNo + "] FFmpeg 종료 요청");
+                        slot.Runner.StopFfmpeg();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    RaiseLog("[Stream" + slot.StreamNo + "] FFmpeg 종료 중 오류: " + ex.Message);
+                }
+                finally
+                {
+                    DisposeSlot(slot);
+                }
+            }
         }
 
-        private void OnProcessOutputReceived(string line)
+        private void OnProcessOutputReceived(int streamNo, string line)
         {
-            RaiseLog("[OUT] " + line);
+            RaiseLog("[Stream" + streamNo + "][OUT] " + line);
         }
 
-        private void OnProcessErrorReceived(string line)
+        private void OnProcessErrorReceived(int streamNo, string line)
         {
             /*
              * FFmpeg는 정상 진행 로그도 stderr로 출력한다.
@@ -159,14 +347,21 @@ namespace pccam_32.Services
              * 
              * 따라서 [ERR] 로그가 있다고 해서 무조건 오류로 처리하지 않는다.
              */
-            RaiseLog("[ERR] " + line);
+            RaiseLog("[Stream" + streamNo + "][ERR] " + line);
         }
 
-        private void OnProcessExited(int exitCode)
+        private void OnProcessExited(int streamNo, int exitCode)
         {
-            RaiseLog("FFmpeg 종료됨. ExitCode=" + exitCode);
+            lock (_syncLock)
+            {
+                if (_processSlots.ContainsKey(streamNo))
+                    _processSlots.Remove(streamNo);
+            }
+
+            RaiseLog("[Stream" + streamNo + "] FFmpeg 종료됨. ExitCode=" + exitCode);
 
             Action<int> handler = Exited;
+
             if (handler != null)
                 handler(exitCode);
         }
@@ -177,6 +372,21 @@ namespace pccam_32.Services
 
             if (handler != null)
                 handler(message);
+        }
+
+        private void DisposeSlot(FfmpegProcessSlot slot)
+        {
+            if (slot == null)
+                return;
+
+            try
+            {
+                if (slot.Runner != null)
+                    slot.Runner.Dispose();
+            }
+            catch
+            {
+            }
         }
 
         public void Dispose()
@@ -192,18 +402,16 @@ namespace pccam_32.Services
             {
             }
 
-            try
-            {
-                _processRunner.OutputReceived -= OnProcessOutputReceived;
-                _processRunner.ErrorReceived -= OnProcessErrorReceived;
-                _processRunner.Exited -= OnProcessExited;
-                _processRunner.Dispose();
-            }
-            catch
-            {
-            }
-
             _disposed = true;
+        }
+
+        /// <summary>
+        /// StreamNo별 FFmpeg 실행 정보를 보관하는 내부 모델.
+        /// </summary>
+        private class FfmpegProcessSlot
+        {
+            public int StreamNo;
+            public ProcessRunner Runner;
         }
     }
 }

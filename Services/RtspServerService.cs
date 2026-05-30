@@ -96,6 +96,7 @@ namespace pccam_32.Services
 
             WriteMediaMtxConfig(config, configPath);
 
+
             string arguments = "\"" + configPath + "\"";
 
             RaiseLog("MediaMTX 실행 파일: " + exePath);
@@ -178,6 +179,11 @@ namespace pccam_32.Services
 
             List<string> paths = BuildRtspPaths(appConfig);
 
+            for (int i = 0; i < paths.Count; i++)
+            {
+                RaiseLog("MediaMTX path 생성 대상: " + paths[i]);
+            }
+
             StringBuilder sb = new StringBuilder();
 
             sb.AppendLine("logLevel: info");
@@ -223,30 +229,86 @@ namespace pccam_32.Services
         }
 
         /// <summary>
-        /// AppConfig에 등록된 스트림 경로 목록을 만든다.
+        /// AppConfig에 등록된 RTSP publish 경로 목록을 만든다.
         /// 
-        /// 비활성 스트림이라도 경로를 생성해두면,
-        /// 설정 변경 후 송출 재시작 시 MediaMTX 설정을 다시 만들지 않아도 된다.
-        /// 다만 1단계에서는 설정 저장 후 재시작 안내를 기본으로 한다.
+        /// 각 StreamConfig마다 Main/Sub 경로를 모두 생성한다.
+        /// 
+        /// 예:
+        /// Stream0:
+        /// - poscam
+        /// - poscam_sub
+        /// 
+        /// Stream1:
+        /// - poscam_1
+        /// - poscam_1_sub
+        /// 
+        /// 주의:
+        /// Main/Sub IsEnabled 여부와 무관하게 path는 만들어 둔다.
+        /// MediaMTX는 path가 있어야 FFmpeg publish 요청을 받을 수 있다.
         /// </summary>
         private List<string> BuildRtspPaths(AppConfig appConfig)
         {
             List<string> result = new List<string>();
 
-            if (appConfig.Streams != null)
+            if (appConfig != null && appConfig.Streams != null)
             {
                 foreach (StreamConfig stream in appConfig.Streams)
                 {
                     if (stream == null)
                         continue;
 
-                    string path = NormalizeRtspPath(stream.RtspPath);
+                    /*
+                     * Stream 기본 RTSP 경로.
+                     * 예:
+                     * Stream0 → poscam
+                     * Stream1 → poscam_1
+                     */
+                    string basePath = NormalizeRtspPath(stream.RtspPath);
 
-                    if (string.IsNullOrWhiteSpace(path))
-                        continue;
+                    if (string.IsNullOrWhiteSpace(basePath))
+                    {
+                        basePath = stream.StreamNo == 0
+                            ? "poscam"
+                            : "poscam_" + stream.StreamNo;
+                    }
 
-                    if (!result.Contains(path))
-                        result.Add(path);
+                    /*
+                     * MainStream 경로.
+                     * MainStream 설정이 있으면 해당 값을 우선 사용하고,
+                     * 없으면 basePath를 사용한다.
+                     */
+                    string mainPath = "";
+
+                    if (stream.MainStream != null &&
+                        !string.IsNullOrWhiteSpace(stream.MainStream.RtspPath))
+                    {
+                        mainPath = stream.MainStream.RtspPath;
+                    }
+                    else
+                    {
+                        mainPath = basePath;
+                    }
+
+                    /*
+                     * SubStream 경로.
+                     * SubStream 설정이 있으면 해당 값을 우선 사용하고,
+                     * 없으면 basePath + "_sub"를 사용한다.
+                     */
+                    string subPath = "";
+
+                    if (stream.SubStream != null &&
+                        !string.IsNullOrWhiteSpace(stream.SubStream.RtspPath))
+                    {
+                        subPath = stream.SubStream.RtspPath;
+                    }
+                    else
+                    {
+                        subPath = basePath + "_sub";
+                    }
+
+                    AddRtspPath(result, basePath);
+                    AddRtspPath(result, mainPath);
+                    AddRtspPath(result, subPath);
                 }
             }
 
@@ -254,6 +316,65 @@ namespace pccam_32.Services
                 result.Add("poscam");
 
             return result;
+        }
+
+        /// <summary>
+        /// RTSP 경로를 정리한 뒤 목록에 추가한다.
+        /// 
+        /// 이미 같은 경로가 있으면 중복 추가하지 않는다.
+        /// </summary>
+        /// <param name="paths">
+        /// RTSP 경로 목록.
+        /// </param>
+        /// <param name="path">
+        /// 추가할 RTSP 경로.
+        /// </param>
+        private void AddRtspPath(List<string> paths, string path)
+        {
+            if (paths == null)
+                return;
+
+            string normalizedPath = NormalizeRtspPath(path);
+
+            if (string.IsNullOrWhiteSpace(normalizedPath))
+                return;
+
+            if (!ContainsRtspPath(paths, normalizedPath))
+                paths.Add(normalizedPath);
+        }
+
+        /// <summary>
+        /// RTSP 경로 목록에 같은 경로가 이미 있는지 확인한다.
+        /// 
+        /// 대소문자는 구분하지 않는다.
+        /// </summary>
+        /// <param name="paths">
+        /// RTSP 경로 목록.
+        /// </param>
+        /// <param name="path">
+        /// 확인할 RTSP 경로.
+        /// </param>
+        /// <returns>
+        /// true: 이미 존재함
+        /// false: 존재하지 않음
+        /// </returns>
+        private bool ContainsRtspPath(List<string> paths, string path)
+        {
+            if (paths == null)
+                return false;
+
+            for (int i = 0; i < paths.Count; i++)
+            {
+                if (string.Equals(
+                    paths[i],
+                    path,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         /// <summary>

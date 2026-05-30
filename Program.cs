@@ -1,10 +1,11 @@
-﻿using System;
-using System.Windows.Forms;
-using pccam_32.Infrastructure;
+﻿using pccam_32.Infrastructure;
 using pccam_32.Models;
 using pccam_32.Presenters;
 using pccam_32.Services;
 using pccam_32.Views;
+using System;
+using System.Collections.Generic;
+using System.Windows.Forms;
 
 namespace pccam_32
 {
@@ -142,6 +143,83 @@ namespace pccam_32
                  * 설정 파일이 없으면 ConfigService에서 기본 INI 파일을 생성한다.
                  */
                 AppConfig config = configService.Load();
+
+                /*
+                 * 현재 PC의 모니터 수에 맞춰 StreamConfig를 보정한다.
+                 * 
+                 * 예:
+                 * 모니터 1대 → Stream0
+                 * 모니터 2대 → Stream0, Stream1
+                 * 모니터 3대 → Stream0, Stream1, Stream2
+                 * 
+                 * 기존 StreamConfig는 삭제하지 않고,
+                 * 부족한 StreamConfig만 추가한다.
+                 */
+                List<string> screenNames = new List<string>();
+
+                /*
+                 * Windows의 DISPLAY 번호와 주 모니터 순서는 다를 수 있다.
+                 * 예:
+                 * 주 모니터가 \\.\DISPLAY2
+                 * 보조 모니터가 \\.\DISPLAY1
+                 * 
+                 * 따라서 Stream0은 Screen.AllScreens[0]이 아니라
+                 * Primary 모니터를 우선으로 생성해야 한다.
+                 */
+                Screen primaryScreen = Screen.PrimaryScreen;
+
+                if (primaryScreen != null &&
+                    !string.IsNullOrWhiteSpace(primaryScreen.DeviceName))
+                {
+                    screenNames.Add(primaryScreen.DeviceName);
+                }
+
+                /*
+                 * Primary를 제외한 나머지 모니터를 뒤에 추가한다.
+                 */
+                foreach (Screen screen in Screen.AllScreens)
+                {
+                    if (screen == null)
+                        continue;
+
+                    if (string.IsNullOrWhiteSpace(screen.DeviceName))
+                        continue;
+
+                    bool isPrimary =
+                        primaryScreen != null &&
+                        string.Equals(
+                            screen.DeviceName,
+                            primaryScreen.DeviceName,
+                            StringComparison.OrdinalIgnoreCase);
+
+                    if (isPrimary)
+                        continue;
+
+                    screenNames.Add(screen.DeviceName);
+                }
+
+                int beforeStreamCount = config.Streams == null
+                    ? 0
+                    : config.Streams.Count;
+
+                AppConfig.EnsureStreamsForMonitorNames(config, screenNames);
+
+                int afterStreamCount = config.Streams == null
+                    ? 0
+                    : config.Streams.Count;
+
+                if (afterStreamCount != beforeStreamCount)
+                {
+                    configService.Save(config);
+
+                    logService.WriteApp(
+                        "모니터 목록 기준 스트림 설정 보정 완료. MonitorCount=" +
+                        screenNames.Count +
+                        ", BeforeStreams=" +
+                        beforeStreamCount +
+                        ", AfterStreams=" +
+                        afterStreamCount);
+                }
 
                 /*
                  * 이전 실행이 비정상 종료되었을 때 남아 있을 수 있는

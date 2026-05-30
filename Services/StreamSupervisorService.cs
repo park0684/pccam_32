@@ -150,12 +150,11 @@ namespace pccam_32.Services
         /// 처리 순서:
         /// 1. 시작 인증 확인
         /// 2. 인증 성공 시 DLL이 반환한 NextCheckAt 기준으로 실행 중 인증 감시 시작
-        /// 3. Stream0 설정 확인
-        /// 4. 모니터 정보 조회
-        /// 5. MediaMTX 실행
-        /// 6. ONVIF HTTP 서버 실행
-        /// 7. ONVIF Discovery 실행
-        /// 8. FFmpeg 실행
+        /// 3. 활성화된 Stream 설정 확인
+        /// 4. MediaMTX 실행
+        /// 5. ONVIF HTTP 서버 실행
+        /// 6. ONVIF Discovery 실행
+        /// 7. 활성화된 모든 StreamConfig에 대해 FFmpeg 실행
         /// </summary>
         public void Start(AppConfig config)
         {
@@ -217,40 +216,29 @@ namespace pccam_32.Services
 
                 /*
                  * 2. 실행 중 인증 감시 시작.
-                 * 
-                 * PC CAM은 재인증 시간을 직접 계산하지 않는다.
-                 * DLL이 반환한 NextCheckAt 시간에 맞춰 RuntimeAuthMonitorService가
-                 * AuthDllAdapter.CheckRuntime()을 호출한다.
                  */
                 _runtimeAuthMonitorService.Start(authResult.NextCheckAt);
 
                 /*
-                 * 3. Stream0 확인.
+                 * 3. 활성 Stream 설정 확인.
+                 * 
+                 * 기존에는 Stream0만 확인했지만,
+                 * 이제는 Stream0, Stream1, Stream2 등 활성화된 모든 Stream을 송출 대상으로 본다.
                  */
                 if (config.Streams == null || config.Streams.Count == 0)
                     throw new InvalidOperationException("스트림 설정이 없습니다.");
 
-                StreamConfig stream = config.Streams[0];
+                int enabledStreamCount = CountEnabledStreams(config);
 
-                if (!stream.IsEnabled)
-                    throw new InvalidOperationException("Stream0이 비활성화되어 있습니다.");
+                if (enabledStreamCount <= 0)
+                    throw new InvalidOperationException("활성화된 스트림 설정이 없습니다.");
 
-                /*
-                 * 4. 모니터 정보 조회.
-                 */
-                MonitorInfo monitor = _monitorService.GetMonitorForStream(stream);
-
-                if (monitor == null)
-                {
-                    throw new InvalidOperationException(
-                        "송출 대상 모니터를 찾을 수 없습니다. 대상: " + stream.MonitorRole);
-                }
-
-                RaiseLog("송출 대상 모니터: " + monitor.DisplayText);
-                RaiseLog("화면명: " + stream.ScreenName);
+                RaiseLog("활성 스트림 수: " + enabledStreamCount);
 
                 /*
-                 * 5. MediaMTX 실행.
+                 * 4. MediaMTX 실행.
+                 * 
+                 * MediaMTX 설정 파일에는 Stream.Main/Sub RTSP 경로가 모두 포함되어 있어야 한다.
                  */
                 _rtspServerService.Start(config);
 
@@ -261,34 +249,33 @@ namespace pccam_32.Services
                 Thread.Sleep(1500);
 
                 /*
-                 * 6. ONVIF HTTP 서버 실행.
-                 * 수동 ONVIF 등록에 필요한 핵심 서비스다.
+                 * 5. ONVIF HTTP 서버 실행.
+                 * 
+                 * ONVIF 서버는 하나의 포트에서 동작하고,
+                 * Profile만 여러 개 반환하는 구조다.
                  */
                 _onvifHttpServerService.Start(config);
 
                 /*
-                 * 7. ONVIF Discovery 실행.
+                 * 6. ONVIF Discovery 실행.
                  * 자동 검색은 부가 기능이므로 실패해도 송출은 계속한다.
                  */
                 TryStartOnvifDiscovery(config);
 
                 /*
-                 * 8. FFmpeg 실행.
+                 * 7. 활성화된 모든 StreamConfig에 대해 FFmpeg 실행.
+                 * 
+                 * Stream0 → 모니터 1
+                 * Stream1 → 모니터 2
+                 * Stream2 → 모니터 3
+                 * 
+                 * 각 Stream은 내부적으로 Main/Sub RTSP 출력을 가질 수 있다.
                  */
-                _ffmpegService.Start(
-                    stream,
-                    monitor,
-                    config.RtspServer);
+                StartEnabledStreams(config);
 
                 SetStatus(StreamRuntimeStatus.Running);
 
-                string rtspUrl =
-                    "rtsp://127.0.0.1:" +
-                    config.RtspServer.RtspPort +
-                    "/" +
-                    stream.RtspPath;
-
-                RaiseLog("송출 시작 완료: " + rtspUrl);
+                RaiseLog("송출 시작 완료. ActiveStreams=" + enabledStreamCount);
             }
             catch (Exception ex)
             {
@@ -339,6 +326,113 @@ namespace pccam_32.Services
                 }
 
                 SetStatus(StreamRuntimeStatus.Error);
+            }
+        }
+
+        /// <summary>
+        /// 활성화된 StreamConfig 개수를 계산한다.
+        /// 
+        /// StreamConfig.IsEnabled가 true인 항목만 송출 대상으로 본다.
+        /// Main/Sub 사용 여부는 FfmpegCommandBuilder에서 다시 판단한다.
+        /// </summary>
+        /// <param name="config">
+        /// 현재 PC CAM 설정.
+        /// </param>
+        /// <returns>
+        /// 활성화된 StreamConfig 개수.
+        /// </returns>
+        private int CountEnabledStreams(AppConfig config)
+        {
+            if (config == null || config.Streams == null)
+                return 0;
+
+            int count = 0;
+
+            foreach (StreamConfig stream in config.Streams)
+            {
+                if (stream == null)
+                    continue;
+
+                if (stream.IsEnabled)
+                    count++;
+            }
+
+            return count;
+        }
+
+        /// <summary>
+        /// 활성화된 모든 StreamConfig에 대해 FFmpeg 송출을 시작한다.
+        /// 
+        /// 각 StreamConfig는 하나의 모니터 화면을 의미한다.
+        /// 각 StreamConfig 내부에는 MainStream/SubStream이 포함될 수 있다.
+        /// </summary>
+        /// <param name="config">
+        /// 현재 PC CAM 설정.
+        /// </param>
+        private void StartEnabledStreams(AppConfig config)
+        {
+            if (config == null || config.Streams == null)
+                return;
+
+            foreach (StreamConfig stream in config.Streams)
+            {
+                if (stream == null)
+                    continue;
+
+                if (!stream.IsEnabled)
+                {
+                    RaiseLog(
+                        "비활성 스트림 건너뜀. StreamNo=" +
+                        stream.StreamNo +
+                        ", ScreenName=" +
+                        stream.ScreenName);
+
+                    continue;
+                }
+
+                /*
+                 * StreamConfig 기준으로 대상 모니터를 찾는다.
+                 * 
+                 * 현재 MonitorService.GetMonitorForStream()이
+                 * MonitorRole 또는 ScreenName 기준으로 모니터를 찾는 구조라면,
+                 * 여기서 각 Stream별로 다른 MonitorInfo가 반환되어야 한다.
+                 */
+                MonitorInfo monitor = _monitorService.GetMonitorForStream(stream);
+
+                if (monitor == null)
+                {
+                    throw new InvalidOperationException(
+                        "송출 대상 모니터를 찾을 수 없습니다. " +
+                        "StreamNo=" +
+                        stream.StreamNo +
+                        ", MonitorRole=" +
+                        stream.MonitorRole +
+                        ", ScreenName=" +
+                        stream.ScreenName);
+                }
+
+                RaiseLog(
+                    "스트림 송출 준비. StreamNo=" +
+                    stream.StreamNo +
+                    ", ScreenName=" +
+                    stream.ScreenName +
+                    ", Monitor=" +
+                    monitor.DisplayText);
+
+                /*
+                 * FfmpegService는 StreamNo별 ProcessRunner를 관리한다.
+                 * 따라서 Stream0, Stream1, Stream2가 각각 별도 FFmpeg 프로세스로 실행된다.
+                 */
+                _ffmpegService.Start(
+                    stream,
+                    monitor,
+                    config.RtspServer);
+
+                RaiseLog(
+                    "스트림 송출 시작 요청 완료. StreamNo=" +
+                    stream.StreamNo +
+                    ", RtspPath=" +
+                    stream.RtspPath);
             }
         }
 

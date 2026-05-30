@@ -147,55 +147,98 @@ namespace pccam_32.Services
         /// <summary>
         /// ONVIF Media Profile 목록 응답을 생성한다.
         /// 
-        /// 초기 단계에서는 Stream0 하나를 하나의 Profile로 반환한다.
-        /// NVR은 이 Profile Token을 사용해 GetStreamUri를 요청한다.
+        /// Main/Sub Stream 구조:
+        /// - profile_0_main → Stream0.MainStream
+        /// - profile_0_sub  → Stream0.SubStream
+        /// - profile_1_main → Stream1.MainStream
+        /// - profile_1_sub  → Stream1.SubStream
+        /// 
+        /// 부모 StreamConfig.IsEnabled가 false이면 해당 Stream의 Main/Sub Profile은 반환하지 않는다.
         /// </summary>
         /// <param name="config">현재 PC CAM 설정.</param>
         /// <returns>GetProfiles SOAP 응답 XML.</returns>
         public string BuildGetProfilesResponse(AppConfig config)
         {
-            StreamConfig stream = FindStream(config, 0);
-
-            string profileToken = "profile_0";
-            string profileName = stream != null && !string.IsNullOrWhiteSpace(stream.ScreenName)
-                ? stream.ScreenName
-                : "PC_CAM_STREAM_0";
-
-            int fps = stream != null ? stream.Fps : 5;
-            string codec = stream != null ? stream.Codec : "H264";
-
             StringBuilder sb = new StringBuilder();
 
             sb.Append(CreateEnvelopeStart());
             sb.Append("<trt:GetProfilesResponse>");
 
-            sb.Append("<trt:Profiles token=\"" + XmlEscape(profileToken) + "\" fixed=\"true\">");
-            sb.Append("<tt:Name>" + XmlEscape(profileName) + "</tt:Name>");
+            bool hasProfile = false;
 
-            sb.Append("<tt:VideoSourceConfiguration token=\"video_source_0\">");
-            sb.Append("<tt:Name>VideoSource0</tt:Name>");
-            sb.Append("<tt:UseCount>1</tt:UseCount>");
-            sb.Append("<tt:SourceToken>source_0</tt:SourceToken>");
-            sb.Append("<tt:Bounds x=\"0\" y=\"0\" width=\"1920\" height=\"1080\" />");
-            sb.Append("</tt:VideoSourceConfiguration>");
+            if (config != null && config.Streams != null)
+            {
+                foreach (StreamConfig stream in config.Streams)
+                {
+                    if (stream == null)
+                        continue;
 
-            sb.Append("<tt:VideoEncoderConfiguration token=\"video_encoder_0\">");
-            sb.Append("<tt:Name>VideoEncoder0</tt:Name>");
-            sb.Append("<tt:UseCount>1</tt:UseCount>");
-            sb.Append("<tt:Encoding>" + NormalizeOnvifCodec(codec) + "</tt:Encoding>");
-            sb.Append("<tt:Resolution>");
-            sb.Append("<tt:Width>1920</tt:Width>");
-            sb.Append("<tt:Height>1080</tt:Height>");
-            sb.Append("</tt:Resolution>");
-            sb.Append("<tt:Quality>5</tt:Quality>");
-            sb.Append("<tt:RateControl>");
-            sb.Append("<tt:FrameRateLimit>" + fps + "</tt:FrameRateLimit>");
-            sb.Append("<tt:EncodingInterval>1</tt:EncodingInterval>");
-            sb.Append("<tt:BitrateLimit>1200</tt:BitrateLimit>");
-            sb.Append("</tt:RateControl>");
-            sb.Append("</tt:VideoEncoderConfiguration>");
+                    if (!stream.IsEnabled)
+                        continue;
 
-            sb.Append("</trt:Profiles>");
+                    StreamQualityConfig mainStream =
+                        stream.MainStream ?? StreamQualityConfig.CreateMain(stream.RtspPath);
+
+                    StreamQualityConfig subStream =
+                        stream.SubStream ?? StreamQualityConfig.CreateSub(stream.RtspPath + "_sub");
+
+                    if (mainStream != null && mainStream.IsEnabled)
+                    {
+                        AppendProfile(
+                            sb,
+                            stream,
+                            mainStream,
+                            "main");
+
+                        hasProfile = true;
+                    }
+
+                    if (subStream != null && subStream.IsEnabled)
+                    {
+                        AppendProfile(
+                            sb,
+                            stream,
+                            subStream,
+                            "sub");
+
+                        hasProfile = true;
+                    }
+                }
+            }
+
+            /*
+             * 안전장치:
+             * 설정이 비어 있거나 활성 Profile이 하나도 없으면 Stream0 Main Profile 하나를 반환한다.
+             * 일부 NVR은 GetProfiles 응답이 비어 있으면 장치 등록을 실패 처리할 수 있다.
+             */
+            if (!hasProfile)
+            {
+                StreamConfig fallbackStream = FindStream(config, 0);
+
+                if (fallbackStream == null)
+                {
+                    fallbackStream = new StreamConfig
+                    {
+                        StreamNo = 0,
+                        IsEnabled = true,
+                        ScreenName = "PC_CAM_STREAM_0",
+                        Codec = "H264",
+                        RtspPath = "poscam",
+                        Fps = 5,
+                        Bitrate = "1200k"
+                    };
+                }
+
+                StreamQualityConfig fallbackMain =
+                    fallbackStream.MainStream ?? StreamQualityConfig.CreateMain(fallbackStream.RtspPath);
+
+                AppendProfile(
+                    sb,
+                    fallbackStream,
+                    fallbackMain,
+                    "main");
+            }
+
             sb.Append("</trt:GetProfilesResponse>");
             sb.Append(CreateEnvelopeEnd());
 
@@ -205,20 +248,23 @@ namespace pccam_32.Services
         /// <summary>
         /// ONVIF Stream URI 응답을 생성한다.
         /// 
-        /// NVR은 GetStreamUri 응답으로 받은 RTSP 주소를 사용해 실제 영상을 가져간다.
-        /// 현재 PC CAM 구조에서는 MediaMTX가 RTSP를 제공하므로,
-        /// 응답 URI는 MediaMTX의 RTSP 주소를 반환한다.
+        /// NVR은 GetProfiles에서 받은 ProfileToken을 기준으로 GetStreamUri를 요청한다.
+        /// ProfileToken에 따라 Main/Sub RTSP 주소를 다르게 반환한다.
+        /// 
+        /// 예:
+        /// - profile_0_main → Stream0.MainStream.RtspPath
+        /// - profile_0_sub  → Stream0.SubStream.RtspPath
         /// </summary>
         /// <param name="config">현재 PC CAM 설정.</param>
         /// <param name="rtspHost">NVR이 접근 가능한 PC CAM 호스트 주소.</param>
-        /// <param name="streamNo">스트림 번호.</param>
+        /// <param name="profileToken">ONVIF Profile Token.</param>
         /// <returns>GetStreamUri SOAP 응답 XML.</returns>
         public string BuildGetStreamUriResponse(
             AppConfig config,
             string rtspHost,
-            int streamNo)
+            string profileToken)
         {
-            string rtspUrl = BuildRtspUrl(config, rtspHost, streamNo);
+            string rtspUrl = BuildRtspUrl(config, rtspHost, profileToken);
 
             StringBuilder sb = new StringBuilder();
 
@@ -304,15 +350,17 @@ namespace pccam_32.Services
         /// <summary>
         /// RTSP Read 주소를 생성한다.
         /// 
-        /// 현재 MediaMTX에는 RTSP readUser/readPass가 적용될 수 있으므로,
-        /// 초기 구현에서는 ONVIF 계정 정보를 RTSP URL에 포함한다.
-        /// 향후 NVR 호환성에 따라 계정 포함 여부를 옵션화할 수 있다.
+        /// ProfileToken에 따라 MainStream 또는 SubStream의 RtspPath를 반환한다.
+        /// 
+        /// 예:
+        /// profile_0_main → Stream0.MainStream.RtspPath
+        /// profile_0_sub  → Stream0.SubStream.RtspPath
         /// </summary>
         /// <param name="config">현재 PC CAM 설정.</param>
         /// <param name="host">NVR이 접근 가능한 PC CAM 호스트.</param>
-        /// <param name="streamNo">스트림 번호.</param>
+        /// <param name="profileToken">ONVIF Profile Token.</param>
         /// <returns>RTSP URL.</returns>
-        private string BuildRtspUrl(AppConfig config, string host, int streamNo)
+        private string BuildRtspUrl(AppConfig config, string host, string profileToken)
         {
             if (config == null)
                 throw new ArgumentNullException("config");
@@ -320,13 +368,30 @@ namespace pccam_32.Services
             if (config.RtspServer == null)
                 throw new InvalidOperationException("RTSP 서버 설정이 없습니다.");
 
+            if (string.IsNullOrWhiteSpace(profileToken))
+                profileToken = "profile_0_main";
+
+            int streamNo = ParseStreamNoFromProfileToken(profileToken);
+            bool isSub = IsSubProfileToken(profileToken);
+
             StreamConfig stream = FindStream(config, streamNo);
 
             if (stream == null)
                 throw new InvalidOperationException("스트림 설정을 찾을 수 없습니다. StreamNo=" + streamNo);
 
+            StreamQualityConfig quality;
+
+            if (isSub)
+                quality = stream.SubStream ?? StreamQualityConfig.CreateSub(stream.RtspPath + "_sub");
+            else
+                quality = stream.MainStream ?? StreamQualityConfig.CreateMain(stream.RtspPath);
+
             string rtspHost = NormalizeHost(host);
-            string path = NormalizeRtspPath(stream.RtspPath);
+
+            string path = NormalizeRtspPath(
+                quality == null
+                    ? stream.RtspPath
+                    : quality.RtspPath);
 
             string userId = "";
             string password = "";
@@ -521,6 +586,218 @@ namespace pccam_32.Services
             sb.Append(CreateEnvelopeEnd());
 
             return sb.ToString();
+        }
+
+        /// <summary>
+        /// ONVIF Profile XML을 추가한다.
+        /// </summary>
+        /// <param name="sb">XML 문자열 작성기.</param>
+        /// <param name="stream">상위 Stream 설정.</param>
+        /// <param name="quality">Main 또는 Sub 품질 설정.</param>
+        /// <param name="qualityName">main 또는 sub.</param>
+        private void AppendProfile(
+            StringBuilder sb,
+            StreamConfig stream,
+            StreamQualityConfig quality,
+            string qualityName)
+        {
+            if (stream == null)
+                return;
+
+            if (quality == null)
+                return;
+
+            string normalizedQualityName =
+                string.Equals(qualityName, "sub", StringComparison.OrdinalIgnoreCase)
+                    ? "sub"
+                    : "main";
+
+            string profileToken =
+                BuildProfileToken(stream.StreamNo, normalizedQualityName);
+
+            string profileName =
+                BuildProfileName(stream, normalizedQualityName);
+
+            int width = quality.Width;
+            int height = quality.Height;
+
+            /*
+             * MainStream은 Width/Height가 0일 수 있다.
+             * ONVIF Profile 응답에는 해상도 값이 필요하므로 기본값을 사용한다.
+             */
+            if (width <= 0)
+                width = 1920;
+
+            if (height <= 0)
+                height = 1080;
+
+            int fps = quality.Fps > 0
+                ? quality.Fps
+                : stream.Fps;
+
+            if (fps <= 0)
+                fps = 5;
+
+            int bitrateLimit = ParseBitrateKbps(quality.Bitrate);
+
+            if (bitrateLimit <= 0)
+                bitrateLimit = ParseBitrateKbps(stream.Bitrate);
+
+            if (bitrateLimit <= 0)
+                bitrateLimit = 1200;
+
+            string codec = NormalizeOnvifCodec(stream.Codec);
+
+            string sourceToken = "source_" + stream.StreamNo;
+            string encoderToken = "video_encoder_" + stream.StreamNo + "_" + normalizedQualityName;
+
+            sb.Append("<trt:Profiles token=\"" + XmlEscape(profileToken) + "\" fixed=\"true\">");
+            sb.Append("<tt:Name>" + XmlEscape(profileName) + "</tt:Name>");
+
+            sb.Append("<tt:VideoSourceConfiguration token=\"video_source_" + stream.StreamNo + "\">");
+            sb.Append("<tt:Name>VideoSource" + stream.StreamNo + "</tt:Name>");
+            sb.Append("<tt:UseCount>1</tt:UseCount>");
+            sb.Append("<tt:SourceToken>" + XmlEscape(sourceToken) + "</tt:SourceToken>");
+            sb.Append("<tt:Bounds x=\"0\" y=\"0\" width=\"" + width + "\" height=\"" + height + "\" />");
+            sb.Append("</tt:VideoSourceConfiguration>");
+
+            sb.Append("<tt:VideoEncoderConfiguration token=\"" + XmlEscape(encoderToken) + "\">");
+            sb.Append("<tt:Name>VideoEncoder" + stream.StreamNo + "_" + normalizedQualityName + "</tt:Name>");
+            sb.Append("<tt:UseCount>1</tt:UseCount>");
+            sb.Append("<tt:Encoding>" + codec + "</tt:Encoding>");
+            sb.Append("<tt:Resolution>");
+            sb.Append("<tt:Width>" + width + "</tt:Width>");
+            sb.Append("<tt:Height>" + height + "</tt:Height>");
+            sb.Append("</tt:Resolution>");
+            sb.Append("<tt:Quality>5</tt:Quality>");
+            sb.Append("<tt:RateControl>");
+            sb.Append("<tt:FrameRateLimit>" + fps + "</tt:FrameRateLimit>");
+            sb.Append("<tt:EncodingInterval>1</tt:EncodingInterval>");
+            sb.Append("<tt:BitrateLimit>" + bitrateLimit + "</tt:BitrateLimit>");
+            sb.Append("</tt:RateControl>");
+            sb.Append("</tt:VideoEncoderConfiguration>");
+
+            sb.Append("</trt:Profiles>");
+        }
+
+        /// <summary>
+        /// ONVIF ProfileToken을 생성한다.
+        /// </summary>
+        /// <param name="streamNo">스트림 번호.</param>
+        /// <param name="qualityName">main 또는 sub.</param>
+        /// <returns>ProfileToken 문자열.</returns>
+        private string BuildProfileToken(int streamNo, string qualityName)
+        {
+            if (string.IsNullOrWhiteSpace(qualityName))
+                qualityName = "main";
+
+            return "profile_" + streamNo + "_" + qualityName.ToLower();
+        }
+
+        /// <summary>
+        /// Profile 표시명을 생성한다.
+        /// </summary>
+        /// <param name="stream">Stream 설정.</param>
+        /// <param name="qualityName">main 또는 sub.</param>
+        /// <returns>Profile 이름.</returns>
+        private string BuildProfileName(StreamConfig stream, string qualityName)
+        {
+            string baseName = "";
+
+            if (stream != null && !string.IsNullOrWhiteSpace(stream.ScreenName))
+                baseName = stream.ScreenName;
+            else if (stream != null)
+                baseName = "PC_CAM_STREAM_" + stream.StreamNo;
+            else
+                baseName = "PC_CAM_STREAM_0";
+
+            if (string.Equals(qualityName, "sub", StringComparison.OrdinalIgnoreCase))
+                return baseName + "_SUB";
+
+            return baseName + "_MAIN";
+        }
+
+        /// <summary>
+        /// ProfileToken에서 스트림 번호를 추출한다.
+        /// 
+        /// 예상 형식:
+        /// profile_0_main
+        /// profile_0_sub
+        /// </summary>
+        private int ParseStreamNoFromProfileToken(string profileToken)
+        {
+            if (string.IsNullOrWhiteSpace(profileToken))
+                return 0;
+
+            string[] parts = profileToken.Split('_');
+
+            if (parts.Length < 3)
+                return 0;
+
+            int streamNo;
+
+            if (int.TryParse(parts[1], out streamNo))
+                return streamNo;
+
+            return 0;
+        }
+
+        /// <summary>
+        /// ProfileToken이 SubStream을 가리키는지 확인한다.
+        /// </summary>
+        private bool IsSubProfileToken(string profileToken)
+        {
+            if (string.IsNullOrWhiteSpace(profileToken))
+                return false;
+
+            return profileToken.IndexOf("_sub", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        /// <summary>
+        /// Bitrate 문자열을 kbps 숫자로 변환한다.
+        /// 
+        /// 예:
+        /// 800k → 800
+        /// 1200k → 1200
+        /// 2m → 2000
+        /// </summary>
+        private int ParseBitrateKbps(string bitrate)
+        {
+            if (string.IsNullOrWhiteSpace(bitrate))
+                return 0;
+
+            string value = bitrate.Trim().ToLower();
+
+            try
+            {
+                if (value.EndsWith("k"))
+                {
+                    value = value.Substring(0, value.Length - 1);
+                    int kbps;
+
+                    if (int.TryParse(value, out kbps))
+                        return kbps;
+                }
+
+                if (value.EndsWith("m"))
+                {
+                    value = value.Substring(0, value.Length - 1);
+                    int mbps;
+
+                    if (int.TryParse(value, out mbps))
+                        return mbps * 1000;
+                }
+
+                int raw;
+
+                if (int.TryParse(value, out raw))
+                    return raw;
+            }
+            catch
+            {
+            }
+
+            return 0;
         }
     }
 }

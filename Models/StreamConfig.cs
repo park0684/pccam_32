@@ -73,5 +73,28 @@
         /// Stream1 = poscam_1
         /// </summary>
         public string RtspPath { get; set; } = "poscam";
+
+        /// <summary>
+        /// 녹화용 고화질 Main Stream 설정.
+        /// </summary>
+        public StreamQualityConfig MainStream { get; set; }
+
+        /// <summary>
+        /// 실시간 보기용 저화질 Sub Stream 설정.
+        /// </summary>
+        public StreamQualityConfig SubStream { get; set; }
+
+        public StreamConfig()
+        {
+            StreamNo = 0;
+            IsEnabled = true;
+            MonitorRole = "";
+            ScreenName = "";
+            RtspPath = "poscam";
+            OnvifPort = 8080;
+
+            MainStream = StreamQualityConfig.CreateMain("poscam");
+            SubStream = StreamQualityConfig.CreateSub("poscam_sub");
+        }
     }
 }
