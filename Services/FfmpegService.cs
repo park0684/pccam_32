@@ -336,18 +336,81 @@ namespace pccam_32.Services
             RaiseLog("[Stream" + streamNo + "][OUT] " + line);
         }
 
+        /// <summary>
+        /// FFmpeg stderr 로그를 처리한다.
+        /// 
+        /// FFmpeg는 정상 실행 중에도 stderr로 진행 상태를 계속 출력한다.
+        /// 예:
+        /// frame=..., fps=..., q=..., size=..., time=..., bitrate=..., speed=...
+        /// 
+        /// 이러한 진행 로그는 장시간 실행 시 로그 파일을 매우 크게 만들기 때문에
+        /// 기본 로그에서는 제외한다.
+        /// 실제 오류, 경고, 종료 메시지는 그대로 기록한다.
+        /// </summary>
+        /// <param name="streamNo">
+        /// FFmpeg가 담당하는 Stream 번호.
+        /// </param>
+        /// <param name="line">
+        /// FFmpeg stderr 출력 한 줄.
+        /// </param>
         private void OnProcessErrorReceived(int streamNo, string line)
         {
+            if (string.IsNullOrWhiteSpace(line))
+                return;
+
             /*
-             * FFmpeg는 정상 진행 로그도 stderr로 출력한다.
+             * 정상 진행 상태 로그는 저장하지 않는다.
+             * 이 로그는 1초 단위로 계속 발생하므로 장시간 실행 시 로그 파일을 크게 만든다.
+             */
+            if (IsFfmpegProgressLine(line))
+                return;
+
+            /*
+             * 진행 로그가 아닌 stderr는 유지한다.
              * 예:
-             * frame=...
-             * fps=...
-             * bitrate=...
-             * 
-             * 따라서 [ERR] 로그가 있다고 해서 무조건 오류로 처리하지 않는다.
+             * - Could not write header
+             * - Error opening output
+             * - Conversion failed
+             * - codec parameter 오류
              */
             RaiseLog("[Stream" + streamNo + "][ERR] " + line);
+        }
+
+        /// <summary>
+        /// FFmpeg 진행 상태 로그인지 확인한다.
+        /// 
+        /// FFmpeg는 정상 동작 중에도 아래와 같은 진행 상태를 stderr로 출력한다.
+        /// frame=..., fps=..., size=..., time=..., bitrate=..., speed=...
+        /// 
+        /// 이 로그는 오류가 아니므로 기본 로그에서는 제외한다.
+        /// </summary>
+        /// <param name="line">
+        /// FFmpeg 출력 한 줄.
+        /// </param>
+        /// <returns>
+        /// true: 진행 상태 로그
+        /// false: 오류/정보 로그
+        /// </returns>
+        private bool IsFfmpegProgressLine(string line)
+        {
+            if (string.IsNullOrWhiteSpace(line))
+                return false;
+
+            string value = line.TrimStart();
+
+            /*
+             * FFmpeg 진행 로그는 대부분 frame= 으로 시작한다.
+             */
+            if (value.StartsWith("frame=", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            /*
+             * 일부 빌드나 옵션에 따라 fps= 로 시작하는 진행 로그가 나올 수 있다.
+             */
+            if (value.StartsWith("fps=", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            return false;
         }
 
         private void OnProcessExited(int streamNo, int exitCode)

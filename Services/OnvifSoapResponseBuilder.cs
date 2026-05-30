@@ -145,19 +145,50 @@ namespace pccam_32.Services
         }
 
         /// <summary>
+        /// 기존 호출부 호환용 GetProfiles 응답 생성 메서드.
+        /// 
+        /// streamNo를 받지 않는 기존 호출은 Stream0 기준으로 처리한다.
+        /// </summary>
+        /// <param name="config">
+        /// 현재 PC CAM 설정.
+        /// </param>
+        /// <returns>
+        /// Stream0 기준 GetProfiles SOAP 응답 XML.
+        /// </returns>
+        public string BuildGetProfilesResponse(AppConfig config)
+        {
+            return BuildGetProfilesResponse(config, 0);
+        }
+
+        /// <summary>
         /// ONVIF Media Profile 목록 응답을 생성한다.
         /// 
-        /// Main/Sub Stream 구조:
-        /// - profile_0_main → Stream0.MainStream
-        /// - profile_0_sub  → Stream0.SubStream
-        /// - profile_1_main → Stream1.MainStream
-        /// - profile_1_sub  → Stream1.SubStream
+        /// Stream별 ONVIF 포트 구조:
+        /// - 8080 → Stream0 Profile만 반환
+        /// - 8081 → Stream1 Profile만 반환
+        /// - 8082 → Stream2 Profile만 반환
         /// 
-        /// 부모 StreamConfig.IsEnabled가 false이면 해당 Stream의 Main/Sub Profile은 반환하지 않는다.
+        /// 예:
+        /// Stream0:
+        /// - profile_0_main
+        /// - profile_0_sub
+        /// 
+        /// Stream1:
+        /// - profile_1_main
+        /// - profile_1_sub
         /// </summary>
-        /// <param name="config">현재 PC CAM 설정.</param>
-        /// <returns>GetProfiles SOAP 응답 XML.</returns>
-        public string BuildGetProfilesResponse(AppConfig config)
+        /// <param name="config">
+        /// 현재 PC CAM 설정.
+        /// </param>
+        /// <param name="streamNo">
+        /// 현재 ONVIF 포트에 연결된 Stream 번호.
+        /// </param>
+        /// <returns>
+        /// GetProfiles SOAP 응답 XML.
+        /// </returns>
+        public string BuildGetProfilesResponse(
+            AppConfig config,
+            int streamNo)
         {
             StringBuilder sb = new StringBuilder();
 
@@ -166,68 +197,51 @@ namespace pccam_32.Services
 
             bool hasProfile = false;
 
-            if (config != null && config.Streams != null)
+            StreamConfig stream = FindStream(config, streamNo);
+
+            /*
+             * 현재 StreamNo에 해당하는 Stream만 Profile로 반환한다.
+             * 기존처럼 전체 config.Streams를 순회하지 않는다.
+             */
+            if (stream != null && stream.IsEnabled)
             {
-                foreach (StreamConfig stream in config.Streams)
+                StreamQualityConfig mainStream =
+                    stream.MainStream ?? StreamQualityConfig.CreateMain(stream.RtspPath);
+
+                StreamQualityConfig subStream =
+                    stream.SubStream ?? StreamQualityConfig.CreateSub(stream.RtspPath + "_sub");
+
+                if (mainStream != null && mainStream.IsEnabled)
                 {
-                    if (stream == null)
-                        continue;
+                    AppendProfile(
+                        sb,
+                        stream,
+                        mainStream,
+                        "main");
 
-                    if (!stream.IsEnabled)
-                        continue;
+                    hasProfile = true;
+                }
 
-                    StreamQualityConfig mainStream =
-                        stream.MainStream ?? StreamQualityConfig.CreateMain(stream.RtspPath);
+                if (subStream != null && subStream.IsEnabled)
+                {
+                    AppendProfile(
+                        sb,
+                        stream,
+                        subStream,
+                        "sub");
 
-                    StreamQualityConfig subStream =
-                        stream.SubStream ?? StreamQualityConfig.CreateSub(stream.RtspPath + "_sub");
-
-                    if (mainStream != null && mainStream.IsEnabled)
-                    {
-                        AppendProfile(
-                            sb,
-                            stream,
-                            mainStream,
-                            "main");
-
-                        hasProfile = true;
-                    }
-
-                    if (subStream != null && subStream.IsEnabled)
-                    {
-                        AppendProfile(
-                            sb,
-                            stream,
-                            subStream,
-                            "sub");
-
-                        hasProfile = true;
-                    }
+                    hasProfile = true;
                 }
             }
 
             /*
              * 안전장치:
-             * 설정이 비어 있거나 활성 Profile이 하나도 없으면 Stream0 Main Profile 하나를 반환한다.
+             * 해당 StreamNo의 Profile이 없으면 해당 StreamNo 기준 Main Profile 하나를 반환한다.
              * 일부 NVR은 GetProfiles 응답이 비어 있으면 장치 등록을 실패 처리할 수 있다.
              */
             if (!hasProfile)
             {
-                StreamConfig fallbackStream = FindStream(config, 0);
-
-                if (fallbackStream == null)
-                {
-                    fallbackStream = new StreamConfig
-                    {
-                        StreamNo = 0,
-                        IsEnabled = true,
-                        ScreenName = "PC_CAM_STREAM_0",
-                        Codec = "H264",
-                        RtspPath = "poscam",
-                        Fps = 5,
-                        Bitrate = "1200k"
-                    };
-                }
+                StreamConfig fallbackStream = CreateFallbackStream(streamNo);
 
                 StreamQualityConfig fallbackMain =
                     fallbackStream.MainStream ?? StreamQualityConfig.CreateMain(fallbackStream.RtspPath);
@@ -346,6 +360,58 @@ namespace pccam_32.Services
 
             return null;
         }
+
+        /// <summary>
+        /// 특정 StreamNo 기준의 fallback StreamConfig를 생성한다.
+        /// 
+        /// 설정이 없거나 비활성 상태인데도 NVR이 GetProfiles를 요청한 경우,
+        /// 빈 응답으로 등록 실패가 발생하지 않도록 최소 Main Profile을 반환하기 위해 사용한다.
+        /// </summary>
+        /// <param name="streamNo">
+        /// Stream 번호.
+        /// </param>
+        /// <returns>
+        /// fallback StreamConfig.
+        /// </returns>
+        private StreamConfig CreateFallbackStream(int streamNo)
+        {
+            string rtspPath = GetDefaultRtspPath(streamNo);
+
+            return new StreamConfig
+            {
+                StreamNo = streamNo,
+                IsEnabled = true,
+                ScreenName = "PC_CAM_STREAM_" + streamNo,
+                Codec = "H264",
+                RtspPath = rtspPath,
+                Fps = 5,
+                Bitrate = "1200k",
+                MainStream = StreamQualityConfig.CreateMain(rtspPath),
+                SubStream = StreamQualityConfig.CreateSub(rtspPath + "_sub")
+            };
+        }
+
+        /// <summary>
+        /// StreamNo 기준 기본 RTSP 경로를 반환한다.
+        /// 
+        /// Stream0 → poscam
+        /// Stream1 → poscam_1
+        /// Stream2 → poscam_2
+        /// </summary>
+        /// <param name="streamNo">
+        /// Stream 번호.
+        /// </param>
+        /// <returns>
+        /// 기본 RTSP 경로.
+        /// </returns>
+        private string GetDefaultRtspPath(int streamNo)
+        {
+            if (streamNo <= 0)
+                return "poscam";
+
+            return "poscam_" + streamNo;
+        }
+
 
         /// <summary>
         /// RTSP Read 주소를 생성한다.

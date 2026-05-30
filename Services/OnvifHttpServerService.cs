@@ -12,21 +12,12 @@ namespace pccam_32.Services
     /// <summary>
     /// PC CAM ONVIF HTTP 서버 서비스.
     /// 
-    /// 이 서비스는 NVR에서 들어오는 ONVIF SOAP HTTP 요청을 수신하고,
-    /// OnvifRequestDispatcher를 통해 SOAP 응답 XML을 생성한 뒤 반환한다.
+    /// Stream별 ONVIF 포트를 각각 열어 NVR에서 각 모니터를 별도 ONVIF 장치처럼 등록할 수 있게 한다.
     /// 
-    /// 초기 구현 범위:
-    /// - HTTP POST /onvif/device_service
-    /// - HTTP POST /onvif/media_service
-    /// - GetDeviceInformation
-    /// - GetSystemDateAndTime
-    /// - GetCapabilities
-    /// - GetProfiles
-    /// - GetStreamUri
-    /// 
-    /// HttpListener를 사용하지 않고 TcpListener를 사용하는 이유:
-    /// - Windows 7 환경에서 URL ACL 등록 문제가 생길 수 있다.
-    /// - 관리자 권한 없이도 단순 TCP 포트 수신 테스트가 가능하다.
+    /// 예:
+    /// Stream0 → 8080
+    /// Stream1 → 8081
+    /// Stream2 → 8082
     /// </summary>
     public class OnvifHttpServerService : IDisposable
     {
@@ -35,19 +26,16 @@ namespace pccam_32.Services
         private readonly OnvifRequestDispatcher _dispatcher;
         private readonly LogService _logService;
 
-        private TcpListener _listener;
-        private Thread _listenerThread;
+        private readonly Dictionary<int, OnvifListenerSlot> _listenerSlots =
+            new Dictionary<int, OnvifListenerSlot>();
+
         private AppConfig _currentConfig;
 
-        private bool _isRunning;
         private bool _disposed;
-        private int _listeningPort;
 
         /// <summary>
         /// ONVIF HTTP 서버 서비스를 생성한다.
         /// </summary>
-        /// <param name="dispatcher">ONVIF SOAP 요청 분기 처리기.</param>
-        /// <param name="logService">로그 기록 서비스.</param>
         public OnvifHttpServerService(
             OnvifRequestDispatcher dispatcher,
             LogService logService)
@@ -63,7 +51,7 @@ namespace pccam_32.Services
         }
 
         /// <summary>
-        /// 현재 ONVIF HTTP 서버가 실행 중인지 여부를 반환한다.
+        /// 하나 이상의 ONVIF HTTP 서버가 실행 중인지 여부를 반환한다.
         /// </summary>
         public bool IsRunning
         {
@@ -71,14 +59,20 @@ namespace pccam_32.Services
             {
                 lock (_syncLock)
                 {
-                    return _isRunning;
+                    foreach (KeyValuePair<int, OnvifListenerSlot> pair in _listenerSlots)
+                    {
+                        if (pair.Value != null && pair.Value.IsRunning)
+                            return true;
+                    }
+
+                    return false;
                 }
             }
         }
 
         /// <summary>
-        /// 현재 ONVIF HTTP 서버가 수신 중인 포트 번호를 반환한다.
-        /// 실행 중이 아니면 0을 반환한다.
+        /// 호환용 속성.
+        /// 실행 중인 첫 번째 ONVIF 포트를 반환한다.
         /// </summary>
         public int ListeningPort
         {
@@ -86,19 +80,24 @@ namespace pccam_32.Services
             {
                 lock (_syncLock)
                 {
-                    return _isRunning ? _listeningPort : 0;
+                    foreach (KeyValuePair<int, OnvifListenerSlot> pair in _listenerSlots)
+                    {
+                        if (pair.Value != null && pair.Value.IsRunning)
+                            return pair.Value.Port;
+                    }
+
+                    return 0;
                 }
             }
         }
 
         /// <summary>
-        /// ONVIF HTTP 서버를 시작한다.
+        /// 활성화된 StreamConfig마다 ONVIF HTTP 서버를 시작한다.
         /// 
-        /// 현재 2단계 초기 구현에서는 Stream0의 OnvifPort를 사용한다.
-        /// 향후 다중 스트림을 ONVIF Profile로 확장할 경우에도
-        /// ONVIF 서버 자체는 하나의 포트에서 동작하고 Profile만 여러 개 반환하는 구조가 적합하다.
+        /// Stream0 → Stream0.OnvifPort
+        /// Stream1 → Stream1.OnvifPort
+        /// Stream2 → Stream2.OnvifPort
         /// </summary>
-        /// <param name="config">현재 PC CAM 설정.</param>
         public void Start(AppConfig config)
         {
             if (_disposed)
@@ -109,94 +108,193 @@ namespace pccam_32.Services
 
             lock (_syncLock)
             {
-                if (_isRunning)
+                if (IsRunning)
                     return;
 
                 _currentConfig = config;
-                _listeningPort = ResolveOnvifPort(config);
-
-                if (_listeningPort <= 0 || _listeningPort > 65535)
-                    throw new InvalidOperationException("ONVIF 포트 값이 올바르지 않습니다. Port=" + _listeningPort);
-
-                _listener = new TcpListener(IPAddress.Any, _listeningPort);
-                _listener.Start();
-
-                _isRunning = true;
-
-                _listenerThread = new Thread(AcceptLoop);
-                _listenerThread.IsBackground = true;
-                _listenerThread.Name = "PC CAM ONVIF HTTP Listener";
-                _listenerThread.Start();
-
-                _logService.WriteApp("ONVIF HTTP 서버 시작. Port=" + _listeningPort);
             }
+
+            if (config.Streams == null || config.Streams.Count == 0)
+                throw new InvalidOperationException("ONVIF 서버를 시작할 스트림 설정이 없습니다.");
+
+            HashSet<int> usedPorts = new HashSet<int>();
+
+            foreach (StreamConfig stream in config.Streams)
+            {
+                if (stream == null)
+                    continue;
+
+                if (!stream.IsEnabled)
+                    continue;
+
+                int port = ResolveOnvifPort(stream);
+
+                if (usedPorts.Contains(port))
+                {
+                    throw new InvalidOperationException(
+                        "ONVIF 포트가 중복되었습니다. Port=" +
+                        port +
+                        ", StreamNo=" +
+                        stream.StreamNo);
+                }
+
+                usedPorts.Add(port);
+
+                StartListenerForStream(stream, port);
+            }
+
+            if (!IsRunning)
+                throw new InvalidOperationException("시작된 ONVIF HTTP 서버가 없습니다.");
         }
 
         /// <summary>
-        /// ONVIF HTTP 서버를 중지한다.
-        /// 
-        /// TcpListener.Stop을 호출하면 AcceptTcpClient 대기 중인 스레드에서 예외가 발생할 수 있다.
-        /// 이 예외는 정상적인 중지 과정으로 처리한다.
+        /// 특정 Stream의 ONVIF HTTP Listener를 시작한다.
+        /// </summary>
+        private void StartListenerForStream(StreamConfig stream, int port)
+        {
+            if (stream == null)
+                return;
+
+            if (port <= 0 || port > 65535)
+                throw new InvalidOperationException("ONVIF 포트 값이 올바르지 않습니다. Port=" + port);
+
+            int streamNo = stream.StreamNo;
+
+            TcpListener listener = new TcpListener(IPAddress.Any, port);
+            listener.Start();
+
+            OnvifListenerSlot slot = new OnvifListenerSlot();
+            slot.StreamNo = streamNo;
+            slot.Port = port;
+            slot.Listener = listener;
+            slot.IsRunning = true;
+
+            Thread thread = new Thread(delegate ()
+            {
+                AcceptLoop(slot);
+            });
+
+            thread.IsBackground = true;
+            thread.Name = "PC CAM ONVIF HTTP Listener Stream" + streamNo;
+
+            slot.Thread = thread;
+
+            lock (_syncLock)
+            {
+                if (_listenerSlots.ContainsKey(streamNo))
+                {
+                    OnvifListenerSlot oldSlot = _listenerSlots[streamNo];
+                    _listenerSlots.Remove(streamNo);
+                    StopSlot(oldSlot);
+                }
+
+                _listenerSlots.Add(streamNo, slot);
+            }
+
+            thread.Start();
+
+            _logService.WriteApp(
+                "ONVIF HTTP 서버 시작. StreamNo=" +
+                streamNo +
+                ", Port=" +
+                port);
+        }
+
+        /// <summary>
+        /// 모든 ONVIF HTTP 서버를 중지한다.
         /// </summary>
         public void Stop()
         {
+            List<OnvifListenerSlot> slots = new List<OnvifListenerSlot>();
+
             lock (_syncLock)
             {
-                if (!_isRunning)
-                    return;
-
-                _isRunning = false;
-
-                try
+                foreach (KeyValuePair<int, OnvifListenerSlot> pair in _listenerSlots)
                 {
-                    if (_listener != null)
-                        _listener.Stop();
-                }
-                catch
-                {
+                    if (pair.Value != null)
+                        slots.Add(pair.Value);
                 }
 
-                _listener = null;
-
-                _logService.WriteApp("ONVIF HTTP 서버 중지 요청");
+                _listenerSlots.Clear();
             }
+
+            for (int i = 0; i < slots.Count; i++)
+            {
+                StopSlot(slots[i]);
+            }
+
+            if (slots.Count > 0)
+                _logService.WriteApp("ONVIF HTTP 서버 전체 중지 요청. Count=" + slots.Count);
+        }
+
+        /// <summary>
+        /// 특정 Listener Slot을 중지한다.
+        /// </summary>
+        private void StopSlot(OnvifListenerSlot slot)
+        {
+            if (slot == null)
+                return;
+
+            slot.IsRunning = false;
 
             try
             {
-                if (_listenerThread != null && _listenerThread.IsAlive)
-                    _listenerThread.Join(1000);
+                if (slot.Listener != null)
+                    slot.Listener.Stop();
             }
             catch
             {
             }
 
-            _listenerThread = null;
+            try
+            {
+                if (slot.Thread != null && slot.Thread.IsAlive)
+                    slot.Thread.Join(1000);
+            }
+            catch
+            {
+            }
+
+            _logService.WriteApp(
+                "ONVIF HTTP 서버 중지. StreamNo=" +
+                slot.StreamNo +
+                ", Port=" +
+                slot.Port);
         }
 
         /// <summary>
         /// TCP 클라이언트 연결을 대기하고 수락하는 루프.
-        /// 
-        /// 연결을 수락하면 ThreadPool에서 개별 요청 처리를 수행한다.
         /// </summary>
-        private void AcceptLoop()
+        private void AcceptLoop(OnvifListenerSlot slot)
         {
-            while (IsRunning)
+            while (slot != null && slot.IsRunning)
             {
                 try
                 {
-                    TcpListener listener = _listener;
+                    TcpListener listener = slot.Listener;
 
                     if (listener == null)
                         return;
 
                     TcpClient client = listener.AcceptTcpClient();
 
-                    ThreadPool.QueueUserWorkItem(HandleClient, client);
+                    OnvifClientState state = new OnvifClientState();
+                    state.Client = client;
+                    state.StreamNo = slot.StreamNo;
+                    state.Port = slot.Port;
+
+                    ThreadPool.QueueUserWorkItem(HandleClient, state);
                 }
                 catch (SocketException)
                 {
-                    if (IsRunning)
-                        _logService.WriteError("ONVIF HTTP 서버 소켓 오류 발생");
+                    if (slot != null && slot.IsRunning)
+                    {
+                        _logService.WriteError(
+                            "ONVIF HTTP 서버 소켓 오류 발생. StreamNo=" +
+                            slot.StreamNo +
+                            ", Port=" +
+                            slot.Port);
+                    }
                 }
                 catch (ObjectDisposedException)
                 {
@@ -204,29 +302,32 @@ namespace pccam_32.Services
                 }
                 catch (Exception ex)
                 {
-                    if (IsRunning)
-                        _logService.WriteException("ONVIF HTTP 요청 수락 오류", ex);
+                    if (slot != null && slot.IsRunning)
+                    {
+                        _logService.WriteException(
+                            "ONVIF HTTP 요청 수락 오류. StreamNo=" +
+                            slot.StreamNo +
+                            ", Port=" +
+                            slot.Port,
+                            ex);
+                    }
                 }
             }
         }
 
         /// <summary>
         /// 개별 ONVIF HTTP 클라이언트 요청을 처리한다.
-        /// 
-        /// 처리 순서:
-        /// 1. HTTP 요청 라인과 헤더를 읽는다.
-        /// 2. POST 본문 SOAP XML을 읽는다.
-        /// 3. 요청 Host 값을 기준으로 NVR이 접근한 PC CAM 주소를 추정한다.
-        /// 4. OnvifRequestDispatcher로 SOAP 응답을 생성한다.
-        /// 5. HTTP 200 응답으로 SOAP XML을 반환한다.
         /// </summary>
-        /// <param name="state">TcpClient 객체.</param>
         private void HandleClient(object state)
         {
-            TcpClient client = state as TcpClient;
+            OnvifClientState clientState = state as OnvifClientState;
 
-            if (client == null)
+            if (clientState == null || clientState.Client == null)
                 return;
+
+            TcpClient client = clientState.Client;
+            int streamNo = clientState.StreamNo;
+            int onvifPort = clientState.Port;
 
             try
             {
@@ -269,7 +370,7 @@ namespace pccam_32.Services
                             stream,
                             200,
                             "OK",
-                            "PC CAM ONVIF service is running");
+                            "PC CAM ONVIF service is running. StreamNo=" + streamNo);
 
                         return;
                     }
@@ -285,38 +386,63 @@ namespace pccam_32.Services
                         return;
                     }
 
-                    /*
-                     * NVR이 어떤 ONVIF 액션을 호출했는지 로그로 남긴다.
-                     * 제조사별 등록 흐름을 분석하기 위해 매우 중요하다.
-                     */
                     string actionName = _dispatcher.GetActionName(request.Body);
 
-                    _logService.WriteApp(
-                        "ONVIF 요청 수신. Action=" +
-                        actionName +
-                        ", Path=" +
-                        request.Path +
-                        ", Host=" +
-                        host);
+                    /*
+                     * ONVIF 요청은 NVR에서 매우 자주 반복 호출된다.
+                     * 운영 중에는 모든 요청을 로그로 남기지 않고,
+                     * Operation.EnableDetailLog=True일 때만 상세 로그를 남긴다.
+                     */
+                    bool detailLog = IsDetailLogEnabled(config);
 
-                    if (string.Equals(actionName, "GetProfiles", StringComparison.OrdinalIgnoreCase))
+                    if (detailLog)
                     {
-                        _logService.WriteApp("ONVIF GetProfiles 요청 수신");
+                        _logService.WriteApp(
+                            "ONVIF 요청 수신. StreamNo=" +
+                            streamNo +
+                            ", Port=" +
+                            onvifPort +
+                            ", Action=" +
+                            actionName +
+                            ", Path=" +
+                            request.Path +
+                            ", Host=" +
+                            host);
                     }
 
-                    if (string.Equals(actionName, "GetStreamUri", StringComparison.OrdinalIgnoreCase))
+                    if (detailLog &&
+                        string.Equals(actionName, "GetProfiles", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _logService.WriteApp(
+                            "ONVIF GetProfiles 요청 수신. StreamNo=" +
+                            streamNo +
+                            ", Port=" +
+                            onvifPort);
+                    }
+
+                    if (detailLog &&
+                        string.Equals(actionName, "GetStreamUri", StringComparison.OrdinalIgnoreCase))
                     {
                         string profileToken = ExtractProfileTokenForLog(request.Body);
 
                         _logService.WriteApp(
-                            "ONVIF GetStreamUri 요청 수신. ProfileToken=" +
+                            "ONVIF GetStreamUri 요청 수신. StreamNo=" +
+                            streamNo +
+                            ", Port=" +
+                            onvifPort +
+                            ", ProfileToken=" +
                             profileToken);
                     }
 
-                    if (string.Equals(actionName, "Unknown", StringComparison.OrdinalIgnoreCase))
+                    if (detailLog &&
+                        string.Equals(actionName, "Unknown", StringComparison.OrdinalIgnoreCase))
                     {
                         _logService.WriteApp(
-                            "ONVIF 미지원 요청 감지. Path=" +
+                            "ONVIF 미지원 요청 감지. StreamNo=" +
+                            streamNo +
+                            ", Port=" +
+                            onvifPort +
+                            ", Path=" +
                             request.Path +
                             ", BodyLength=" +
                             (request.Body == null ? 0 : request.Body.Length));
@@ -326,14 +452,20 @@ namespace pccam_32.Services
                         request.Body,
                         config,
                         host,
-                        _listeningPort);
+                        onvifPort,
+                        streamNo);
 
-                    if (string.Equals(actionName, "GetStreamUri", StringComparison.OrdinalIgnoreCase))
+                    if (detailLog &&
+                        string.Equals(actionName, "GetStreamUri", StringComparison.OrdinalIgnoreCase))
                     {
                         string rtspUri = ExtractRtspUriForLog(responseXml);
 
                         _logService.WriteApp(
-                            "ONVIF GetStreamUri 응답. RtspUri=" +
+                            "ONVIF GetStreamUri 응답. StreamNo=" +
+                            streamNo +
+                            ", Port=" +
+                            onvifPort +
+                            ", RtspUri=" +
                             rtspUri);
                     }
 
@@ -342,24 +474,38 @@ namespace pccam_32.Services
             }
             catch (Exception ex)
             {
-                _logService.WriteException("ONVIF HTTP 요청 처리 오류", ex);
+                _logService.WriteException(
+                    "ONVIF HTTP 요청 처리 오류. StreamNo=" +
+                    streamNo +
+                    ", Port=" +
+                    onvifPort,
+                    ex);
             }
         }
 
         /// <summary>
-        /// ONVIF GetStreamUri 요청 XML에서 ProfileToken 값을 로그용으로 추출한다.
+        /// 상세 로그 사용 여부를 반환한다.
         /// 
-        /// 지원 형태:
-        /// - <ProfileToken>profile_0_main</ProfileToken>
-        /// - <trt:ProfileToken>profile_0_sub</trt:ProfileToken>
+        /// Operation.EnableDetailLog=True이면 ONVIF 요청/응답 상세 로그를 남긴다.
+        /// false이면 NVR의 반복 요청 로그를 생략한다.
         /// </summary>
-        /// <param name="requestBody">
-        /// ONVIF SOAP 요청 본문.
+        /// <param name="config">
+        /// 현재 PC CAM 설정.
         /// </param>
         /// <returns>
-        /// ProfileToken 값.
-        /// 찾지 못하면 빈 문자열.
+        /// true: 상세 로그 사용
+        /// false: 반복 상세 로그 생략
         /// </returns>
+        private bool IsDetailLogEnabled(AppConfig config)
+        {
+            return config != null &&
+                   config.Operation != null &&
+                   config.Operation.EnableDetailLog;
+        }
+
+        /// <summary>
+        /// ONVIF GetStreamUri 요청 XML에서 ProfileToken 값을 로그용으로 추출한다.
+        /// </summary>
         private string ExtractProfileTokenForLog(string requestBody)
         {
             if (string.IsNullOrWhiteSpace(requestBody))
@@ -400,13 +546,6 @@ namespace pccam_32.Services
         /// <summary>
         /// ONVIF GetStreamUri 응답 XML에서 RTSP URI를 로그용으로 추출한다.
         /// </summary>
-        /// <param name="responseXml">
-        /// ONVIF SOAP 응답 XML.
-        /// </param>
-        /// <returns>
-        /// RTSP URI.
-        /// 찾지 못하면 빈 문자열.
-        /// </returns>
         private string ExtractRtspUriForLog(string responseXml)
         {
             if (string.IsNullOrWhiteSpace(responseXml))
@@ -431,14 +570,10 @@ namespace pccam_32.Services
                 .Substring(startIndex, endIndex - startIndex)
                 .Trim();
         }
+
         /// <summary>
         /// HTTP 요청을 읽어 OnvifHttpRequest 객체로 변환한다.
-        /// 
-        /// 현재 구현은 Content-Length 기반 요청을 처리한다.
-        /// ONVIF NVR의 일반 SOAP POST 요청은 대부분 Content-Length를 포함한다.
         /// </summary>
-        /// <param name="stream">클라이언트 네트워크 스트림.</param>
-        /// <returns>파싱된 HTTP 요청 객체. 실패 시 null.</returns>
         private OnvifHttpRequest ReadHttpRequest(NetworkStream stream)
         {
             StreamReader reader = new StreamReader(stream, Encoding.UTF8);
@@ -514,14 +649,7 @@ namespace pccam_32.Services
 
         /// <summary>
         /// 요청에서 NVR이 접근한 PC CAM 호스트 주소를 추정한다.
-        /// 
-        /// 우선 HTTP Host 헤더를 사용한다.
-        /// Host 헤더가 없으면 TcpClient의 LocalEndPoint 주소를 사용한다.
-        /// 이 호스트 값은 GetCapabilities의 XAddr과 GetStreamUri의 RTSP 주소 생성에 사용된다.
         /// </summary>
-        /// <param name="request">HTTP 요청 객체.</param>
-        /// <param name="client">요청을 보낸 TcpClient.</param>
-        /// <returns>NVR이 접근 가능한 PC CAM 호스트 주소.</returns>
         private string ResolveRequestHost(
             OnvifHttpRequest request,
             TcpClient client)
@@ -565,8 +693,6 @@ namespace pccam_32.Services
         /// <summary>
         /// SOAP XML 응답을 HTTP 응답으로 전송한다.
         /// </summary>
-        /// <param name="stream">클라이언트 네트워크 스트림.</param>
-        /// <param name="xml">전송할 SOAP XML.</param>
         private void WriteSoapResponse(
             NetworkStream stream,
             string xml)
@@ -592,13 +718,7 @@ namespace pccam_32.Services
 
         /// <summary>
         /// 일반 텍스트 HTTP 응답을 전송한다.
-        /// 
-        /// 브라우저로 ONVIF 포트를 열어 서비스 실행 여부를 확인할 때도 사용된다.
         /// </summary>
-        /// <param name="stream">클라이언트 네트워크 스트림.</param>
-        /// <param name="statusCode">HTTP 상태 코드.</param>
-        /// <param name="statusText">HTTP 상태 문구.</param>
-        /// <param name="text">응답 본문 텍스트.</param>
         private void WriteTextResponse(
             NetworkStream stream,
             int statusCode,
@@ -625,32 +745,21 @@ namespace pccam_32.Services
         }
 
         /// <summary>
-        /// 설정에서 ONVIF HTTP 포트를 결정한다.
-        /// 
-        /// 현재는 Stream0의 OnvifPort를 사용한다.
-        /// 값이 없거나 잘못된 경우 8080을 기본값으로 사용한다.
+        /// StreamConfig에서 ONVIF HTTP 포트를 결정한다.
+        /// 값이 없거나 잘못된 경우 StreamNo 기준 기본값을 사용한다.
         /// </summary>
-        /// <param name="config">현재 PC CAM 설정.</param>
-        /// <returns>ONVIF HTTP 포트.</returns>
-        private int ResolveOnvifPort(AppConfig config)
+        private int ResolveOnvifPort(StreamConfig stream)
         {
-            if (config != null && config.Streams != null)
+            if (stream != null &&
+                stream.OnvifPort > 0 &&
+                stream.OnvifPort <= 65535)
             {
-                foreach (StreamConfig stream in config.Streams)
-                {
-                    if (stream == null)
-                        continue;
-
-                    if (stream.StreamNo == 0 &&
-                        stream.OnvifPort > 0 &&
-                        stream.OnvifPort <= 65535)
-                    {
-                        return stream.OnvifPort;
-                    }
-                }
+                return stream.OnvifPort;
             }
 
-            return 8080;
+            int streamNo = stream == null ? 0 : stream.StreamNo;
+
+            return 8080 + streamNo;
         }
 
         /// <summary>
@@ -673,9 +782,29 @@ namespace pccam_32.Services
         }
 
         /// <summary>
+        /// ONVIF Listener 정보.
+        /// </summary>
+        private class OnvifListenerSlot
+        {
+            public int StreamNo;
+            public int Port;
+            public TcpListener Listener;
+            public Thread Thread;
+            public bool IsRunning;
+        }
+
+        /// <summary>
+        /// 클라이언트 요청 처리에 필요한 상태값.
+        /// </summary>
+        private class OnvifClientState
+        {
+            public TcpClient Client;
+            public int StreamNo;
+            public int Port;
+        }
+
+        /// <summary>
         /// 내부 HTTP 요청 모델.
-        /// 
-        /// ONVIF HTTP 요청의 메서드, 경로, 헤더, 본문을 보관한다.
         /// </summary>
         private class OnvifHttpRequest
         {

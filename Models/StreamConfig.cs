@@ -84,12 +84,21 @@
         /// </summary>
         public StreamQualityConfig SubStream { get; set; }
 
+        /// <summary>
+        /// 사용자가 설정 화면에서 구분하기 쉽게 입력하는 표시명.
+        /// 
+        /// 실제 모니터 매칭에는 사용하지 않는다.
+        /// 모니터 매칭은 ScreenName(예: \\.\DISPLAY1)을 기준으로 처리한다.
+        /// </summary>
+        public string DisplayName { get; set; }
+
         public StreamConfig()
         {
             StreamNo = 0;
             IsEnabled = true;
             MonitorRole = "";
             ScreenName = "";
+            DisplayName = "";
             RtspPath = "poscam";
             OnvifPort = 8080;
 

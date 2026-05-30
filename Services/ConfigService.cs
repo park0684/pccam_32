@@ -184,6 +184,15 @@ namespace pccam_32.Services
              * ScreenName은 현재 단계에서 화면 식별명으로 사용한다.
              */
             stream.ScreenName = ini.ReadString(section, "ScreenName", stream.ScreenName);
+            stream.DisplayName = ini.ReadString(section, "DisplayName", stream.DisplayName);
+
+            if (string.IsNullOrWhiteSpace(stream.DisplayName))
+            {
+                if (stream.StreamNo == 0)
+                    stream.DisplayName = "주 모니터";
+                else
+                    stream.DisplayName = "보조 모니터";
+            }
 
             stream.OnvifPort = ini.ReadInt(section, "OnvifPort", stream.OnvifPort);
             stream.Fps = ini.ReadInt(section, "Fps", stream.Fps);
@@ -242,6 +251,7 @@ namespace pccam_32.Services
             ini.WriteInt(section, "StreamNo", stream.StreamNo);
             ini.WriteString(section, "MonitorRole", stream.MonitorRole);
             ini.WriteString(section, "ScreenName", stream.ScreenName);
+            ini.WriteString(section, "DisplayName", stream.DisplayName);
             ini.WriteInt(section, "OnvifPort", stream.OnvifPort);
             ini.WriteInt(section, "Fps", stream.Fps);
             ini.WriteString(section, "Bitrate", stream.Bitrate);
@@ -329,14 +339,16 @@ namespace pccam_32.Services
 
             config.Onvif.IsEnabled = ini.ReadBool("Onvif", "IsEnabled", config.Onvif.IsEnabled);
             config.Onvif.UserId = ini.ReadString("Onvif", "UserId", config.Onvif.UserId);
-            config.Onvif.Password = ini.ReadString("Onvif", "Password", config.Onvif.Password);
+            
+            string savedPassword = ini.ReadString("Onvif", "Password", config.Onvif.Password);
+            config.Onvif.Password = ConfigCryptoService.Decrypt(savedPassword);
         }
 
         private void SaveOnvif(IniFileHelper ini, OnvifConfig onvif)
         {
             ini.WriteBool("Onvif", "IsEnabled", onvif.IsEnabled);
             ini.WriteString("Onvif", "UserId", onvif.UserId);
-            ini.WriteString("Onvif", "Password", onvif.Password);
+            ini.WriteString("Onvif", "Password", ConfigCryptoService.Encrypt(onvif.Password));
         }
 
         private void LoadAuth(IniFileHelper ini, AppConfig config)

@@ -25,9 +25,10 @@ namespace pccam_32.Views
 
         private readonly CheckBox[] _chkUse = new CheckBox[StreamCount];
         private readonly Label[] _lblNo = new Label[StreamCount];
-        private readonly Label[] _lblMonitor = new Label[StreamCount];
+        //private readonly Label[] _lblMonitor = new Label[StreamCount];
         private readonly TextBox[] _txtOnvifPort = new TextBox[StreamCount];
-        private readonly TextBox[] _txtScreenName = new TextBox[StreamCount];
+        //private readonly TextBox[] _txtScreenName = new TextBox[StreamCount];
+        private readonly TextBox[] _txtDisplayName = new TextBox[StreamCount];
         private readonly ComboBox[] _cboFps = new ComboBox[StreamCount];
         private readonly ComboBox[] _cboBitrate = new ComboBox[StreamCount];
         private readonly ComboBox[] _cboCodec = new ComboBox[StreamCount];
@@ -53,6 +54,14 @@ namespace pccam_32.Views
         public event EventHandler CancelRequested;
         public event EventHandler AuthActionRequested;
 
+        /// <summary>
+        /// 설정 화면에 로드된 원본 Stream 설정 목록.
+        /// 
+        /// 화면에는 일부 항목만 표시되므로,
+        /// MainStream/SubStream처럼 화면에 직접 표시하지 않는 설정은
+        /// 저장 시 기존 값을 유지하기 위해 보관한다.
+        /// </summary>
+        private List<StreamConfig> _loadedStreams = new List<StreamConfig>();
         public SettingView()
         {
 
@@ -62,8 +71,8 @@ namespace pccam_32.Views
         /// <summary>
         /// 스트림 설정 목록.
         /// 
-        /// 설정 파일에는 모니터 좌표/해상도를 저장하지 않고,
-        /// MonitorRole만 저장한다.
+        /// 현재 설정 화면에서는 Stream 단위의 기본 정보와 MainStream 품질 일부만 표시한다.
+        /// SubStream 정보는 화면에 직접 표시하지 않으므로 기존 설정을 유지한다.
         /// </summary>
         public List<StreamConfig> Streams
         {
@@ -73,17 +82,48 @@ namespace pccam_32.Views
 
                 for (int i = 0; i < StreamCount; i++)
                 {
+                    string rtspPath = GetDefaultRtspPath(i);
+
+                    StreamConfig source = FindStream(_loadedStreams, i);
+
+                    StreamQualityConfig mainStream =
+                        CloneStreamQuality(
+                            source == null ? null : source.MainStream,
+                            StreamQualityConfig.CreateMain(rtspPath));
+
+                    StreamQualityConfig subStream =
+                        CloneStreamQuality(
+                            source == null ? null : source.SubStream,
+                            StreamQualityConfig.CreateSub(rtspPath + "_sub"));
+
+                    mainStream.RtspPath = rtspPath;
+                    subStream.RtspPath = rtspPath + "_sub";
+
+                    mainStream.Fps = ToInt(Convert.ToString(_cboFps[i].SelectedItem), mainStream.Fps);
+                    mainStream.Bitrate = Convert.ToString(_cboBitrate[i].SelectedItem);
+
                     result.Add(new StreamConfig
                     {
                         IsEnabled = _chkUse[i].Checked,
                         StreamNo = i,
-                        MonitorRole = i == 0 ? "Primary" : "Secondary",
-                        ScreenName = _txtScreenName[i].Text.Trim(),
+
+                        /*
+                         * 화면에는 표시하지 않지만 내부 모니터 매칭에 필요하므로
+                         * 기존 설정값을 그대로 유지한다.
+                         */
+                        MonitorRole = source == null ? GetDefaultMonitorRole(i) : source.MonitorRole,
+                        ScreenName = source == null ? "" : source.ScreenName,
+
+                        DisplayName = _txtDisplayName[i].Text.Trim(),
                         OnvifPort = ToInt(_txtOnvifPort[i].Text, i == 0 ? 8080 : 8081),
-                        Fps = ToInt(Convert.ToString(_cboFps[i].SelectedItem), 5),
-                        Bitrate = Convert.ToString(_cboBitrate[i].SelectedItem),
+
+                        Fps = mainStream.Fps,
+                        Bitrate = mainStream.Bitrate,
                         Codec = Convert.ToString(_cboCodec[i].SelectedItem),
-                        RtspPath = i == 0 ? "poscam" : "poscam_1"
+                        RtspPath = rtspPath,
+
+                        MainStream = mainStream,
+                        SubStream = subStream
                     });
                 }
 
@@ -92,6 +132,7 @@ namespace pccam_32.Views
             set
             {
                 List<StreamConfig> streams = value ?? new List<StreamConfig>();
+                _loadedStreams = streams;
 
                 for (int i = 0; i < StreamCount; i++)
                 {
@@ -99,29 +140,45 @@ namespace pccam_32.Views
 
                     if (stream == null)
                     {
+                        string defaultRtspPath = GetDefaultRtspPath(i);
+
                         stream = new StreamConfig
                         {
                             StreamNo = i,
-                            MonitorRole = i == 0 ? "Primary" : "Secondary",
+                            MonitorRole = GetDefaultMonitorRole(i),
                             IsEnabled = i == 0,
-                            ScreenName = i == 0 ? "POS_MAIN" : "POS_SUB",
+                            ScreenName = "",
+                            DisplayName = GetDefaultDisplayName(i),
                             OnvifPort = i == 0 ? 8080 : 8081,
                             Fps = 5,
                             Bitrate = "1200k",
                             Codec = "H264",
-                            RtspPath = i == 0 ? "poscam" : "poscam_1"
+                            RtspPath = defaultRtspPath,
+                            MainStream = StreamQualityConfig.CreateMain(defaultRtspPath),
+                            SubStream = StreamQualityConfig.CreateSub(defaultRtspPath + "_sub")
                         };
                     }
 
+                    string rtspPath = string.IsNullOrWhiteSpace(stream.RtspPath)
+                        ? GetDefaultRtspPath(i)
+                        : stream.RtspPath;
+
+                    StreamQualityConfig mainStream =
+                        stream.MainStream ?? StreamQualityConfig.CreateMain(rtspPath);
+
+                    mainStream.RtspPath = rtspPath;
+
                     _chkUse[i].Checked = stream.IsEnabled;
                     _lblNo[i].Text = stream.StreamNo.ToString();
-                    _lblMonitor[i].Text = GetMonitorText(stream.MonitorRole);
+
+                    _txtDisplayName[i].Text = string.IsNullOrWhiteSpace(stream.DisplayName)
+                        ? GetDefaultDisplayName(i)
+                        : stream.DisplayName;
 
                     _txtOnvifPort[i].Text = stream.OnvifPort.ToString();
-                    _txtScreenName[i].Text = stream.ScreenName ?? "";
 
-                    SelectComboValue(_cboFps[i], stream.Fps.ToString());
-                    SelectComboValue(_cboBitrate[i], stream.Bitrate);
+                    SelectComboValue(_cboFps[i], mainStream.Fps.ToString());
+                    SelectComboValue(_cboBitrate[i], mainStream.Bitrate);
                     SelectComboValue(_cboCodec[i], stream.Codec);
                 }
             }
@@ -286,12 +343,11 @@ namespace pccam_32.Views
 
             AddHeader(group, "사용", 20, 25, 45);
             AddHeader(group, "번호", 70, 25, 40);
-            AddHeader(group, "모니터", 115, 25, 105);
-            AddHeader(group, "ONVIF 포트", 225, 25, 80);
-            AddHeader(group, "화면명", 315, 25, 120);
-            AddHeader(group, "FPS", 445, 25, 70);
-            AddHeader(group, "Bitrate", 520, 25, 85);
-            AddHeader(group, "Codec", 610, 25, 75);
+            AddHeader(group, "표시명", 120, 25, 150);
+            AddHeader(group, "ONVIF 포트", 285, 25, 90);
+            AddHeader(group, "Main FPS", 390, 25, 75);
+            AddHeader(group, "Main Bitrate", 475, 25, 100);
+            AddHeader(group, "Codec", 590, 25, 75);
 
             for (int i = 0; i < StreamCount; i++)
             {
@@ -309,42 +365,36 @@ namespace pccam_32.Views
                 _lblNo[i].Width = 30;
                 group.Controls.Add(_lblNo[i]);
 
-                _lblMonitor[i] = new Label();
-                _lblMonitor[i].Left = 115;
-                _lblMonitor[i].Top = top + 6;
-                _lblMonitor[i].Width = 105;
-                group.Controls.Add(_lblMonitor[i]);
+                _txtDisplayName[i] = new TextBox();
+                _txtDisplayName[i].Left = 120;
+                _txtDisplayName[i].Top = top;
+                _txtDisplayName[i].Width = 145;
+                group.Controls.Add(_txtDisplayName[i]);
 
                 _txtOnvifPort[i] = new TextBox();
-                _txtOnvifPort[i].Left = 225;
+                _txtOnvifPort[i].Left = 285;
                 _txtOnvifPort[i].Top = top;
-                _txtOnvifPort[i].Width = 75;
+                _txtOnvifPort[i].Width = 85;
                 group.Controls.Add(_txtOnvifPort[i]);
 
-                _txtScreenName[i] = new TextBox();
-                _txtScreenName[i].Left = 315;
-                _txtScreenName[i].Top = top;
-                _txtScreenName[i].Width = 120;
-                group.Controls.Add(_txtScreenName[i]);
-
                 _cboFps[i] = new ComboBox();
-                _cboFps[i].Left = 445;
+                _cboFps[i].Left = 390;
                 _cboFps[i].Top = top;
-                _cboFps[i].Width = 65;
+                _cboFps[i].Width = 70;
                 _cboFps[i].DropDownStyle = ComboBoxStyle.DropDownList;
                 _cboFps[i].Items.AddRange(new object[] { "5", "10", "15", "30" });
                 group.Controls.Add(_cboFps[i]);
 
                 _cboBitrate[i] = new ComboBox();
-                _cboBitrate[i].Left = 520;
+                _cboBitrate[i].Left = 475;
                 _cboBitrate[i].Top = top;
-                _cboBitrate[i].Width = 80;
+                _cboBitrate[i].Width = 95;
                 _cboBitrate[i].DropDownStyle = ComboBoxStyle.DropDownList;
                 _cboBitrate[i].Items.AddRange(new object[] { "800k", "1200k", "1500k", "2M" });
                 group.Controls.Add(_cboBitrate[i]);
 
                 _cboCodec[i] = new ComboBox();
-                _cboCodec[i].Left = 610;
+                _cboCodec[i].Left = 590;
                 _cboCodec[i].Top = top;
                 _cboCodec[i].Width = 75;
                 _cboCodec[i].DropDownStyle = ComboBoxStyle.DropDownList;
@@ -577,6 +627,72 @@ namespace pccam_32.Views
 
             if (comboBox.Items.Count > 0)
                 comboBox.SelectedIndex = 0;
+        }
+
+        /// <summary>
+        /// StreamNo 기준 기본 RTSP 경로를 반환한다.
+        /// 
+        /// Stream0 → poscam
+        /// Stream1 → poscam_1
+        /// Stream2 → poscam_2
+        /// </summary>
+        private string GetDefaultRtspPath(int streamNo)
+        {
+            if (streamNo <= 0)
+                return "poscam";
+
+            return "poscam_" + streamNo;
+        }
+
+        /// <summary>
+        /// StreamQualityConfig 값을 복사한다.
+        /// 
+        /// 원본이 없으면 기본값을 복사한다.
+        /// View에서 표시하지 않는 SubStream 설정을 보존하기 위해 사용한다.
+        /// </summary>
+        private StreamQualityConfig CloneStreamQuality(
+            StreamQualityConfig source,
+            StreamQualityConfig defaultValue)
+        {
+            StreamQualityConfig baseValue = source ?? defaultValue ?? new StreamQualityConfig();
+
+            return new StreamQualityConfig
+            {
+                IsEnabled = baseValue.IsEnabled,
+                RtspPath = baseValue.RtspPath,
+                Fps = baseValue.Fps,
+                Bitrate = baseValue.Bitrate,
+                Width = baseValue.Width,
+                Height = baseValue.Height
+            };
+        }
+
+        /// <summary>
+        /// Stream 번호 기준 기본 표시명을 반환한다.
+        /// </summary>
+        private string GetDefaultDisplayName(int streamNo)
+        {
+            if (streamNo == 0)
+                return "주 모니터";
+
+            if (streamNo == 1)
+                return "보조 모니터";
+
+            return "모니터 " + streamNo;
+        }
+
+        /// <summary>
+        /// StreamNo 기준 기본 MonitorRole 값을 반환한다.
+        /// </summary>
+        private string GetDefaultMonitorRole(int streamNo)
+        {
+            if (streamNo == 0)
+                return "Primary";
+
+            if (streamNo == 1)
+                return "Secondary";
+
+            return "Monitor" + streamNo;
         }
     }
 }

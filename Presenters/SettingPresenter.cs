@@ -330,10 +330,20 @@ namespace pccam_32.Presenters
                     throw new InvalidOperationException("Bitrate 값이 비어 있습니다.");
 
                 if (string.IsNullOrWhiteSpace(stream.ScreenName))
-                    throw new InvalidOperationException("화면명을 입력하세요.");
+                    throw new InvalidOperationException("모니터 장치명이 비어 있습니다. 모니터 설정을 다시 확인하세요.");
+
+                if (string.IsNullOrWhiteSpace(stream.DisplayName))
+                {
+                    stream.DisplayName = stream.StreamNo == 0
+                        ? "주 모니터"
+                        : "보조 모니터";
+                }
 
                 if (string.IsNullOrWhiteSpace(stream.RtspPath))
                     throw new InvalidOperationException("RTSP 경로가 비어 있습니다.");
+
+                ValidateStreamQuality(stream, stream.MainStream, "MainStream");
+                ValidateStreamQuality(stream, stream.SubStream, "SubStream");
             }
 
             if (config.Onvif == null)
@@ -347,6 +357,44 @@ namespace pccam_32.Presenters
 
             if (string.IsNullOrWhiteSpace(config.Auth.DeviceName))
                 throw new InvalidOperationException("장비명을 입력하세요.");
+        }
+
+        /// <summary>
+        /// Main/Sub Stream 품질 설정을 검증한다.
+        /// </summary>
+        private void ValidateStreamQuality(
+            StreamConfig parentStream,
+            StreamQualityConfig quality,
+            string qualityName)
+        {
+            if (parentStream == null)
+                return;
+
+            /*
+             * 부모 Stream이 비활성화된 경우 Main/Sub는 실제 사용되지 않으므로
+             * 강하게 검증하지 않는다.
+             */
+            if (!parentStream.IsEnabled)
+                return;
+
+            if (quality == null)
+                throw new InvalidOperationException(
+                    "Stream" + parentStream.StreamNo + " " + qualityName + " 설정이 없습니다.");
+
+            if (!quality.IsEnabled)
+                return;
+
+            if (quality.Fps <= 0)
+                throw new InvalidOperationException(
+                    "Stream" + parentStream.StreamNo + " " + qualityName + " FPS 값이 올바르지 않습니다.");
+
+            if (string.IsNullOrWhiteSpace(quality.Bitrate))
+                throw new InvalidOperationException(
+                    "Stream" + parentStream.StreamNo + " " + qualityName + " Bitrate 값이 비어 있습니다.");
+
+            if (string.IsNullOrWhiteSpace(quality.RtspPath))
+                throw new InvalidOperationException(
+                    "Stream" + parentStream.StreamNo + " " + qualityName + " RTSP 경로가 비어 있습니다.");
         }
 
         /// <summary>
