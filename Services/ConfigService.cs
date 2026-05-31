@@ -277,8 +277,18 @@ namespace pccam_32.Services
 
             //저장 전 Main/Sub RTSP 경로 보정. Stream.RtspPath를 기준으로 Main/Sub 경로가 올바르게 설정되도록 보정한다.
             NormalizeStreamQualityPaths(stream);
+            /*
+             * 현재 설정 화면에는 Main/Sub 개별 사용 여부가 없다.
+             * 따라서 부모 Stream의 사용 여부가 Main/Sub 사용 여부의 기준이다.
+             * 
+             * Stream 사용 체크됨  → Main/Sub 모두 사용
+             * Stream 사용 해제됨 → Main/Sub 모두 미사용
+             */
+            ApplyStreamQualityEnabledPolicy(stream);
 
             string section = "Stream" + stream.StreamNo;
+
+
 
             ini.WriteBool(section, "IsEnabled", stream.IsEnabled);
             ini.WriteInt(section, "StreamNo", stream.StreamNo);
@@ -331,9 +341,11 @@ namespace pccam_32.Services
             if (quality == null)
                 return;
 
-            bool effectiveEnabled =
-                parentStreamEnabled &&
-                quality.IsEnabled;
+            /*
+             * Main/Sub 개별 사용 여부는 현재 UI에서 관리하지 않는다.
+             * 부모 Stream이 사용이면 품질 Stream도 사용으로 저장한다.
+             */
+            bool effectiveEnabled = parentStreamEnabled;
 
             ini.WriteBool(section, "IsEnabled", effectiveEnabled);
             ini.WriteString(section, "RtspPath", quality.RtspPath);
@@ -689,6 +701,38 @@ namespace pccam_32.Services
 
             if (stream.SubStream != null)
                 stream.SubStream.IsEnabled = false;
+        }
+
+        /// <summary>
+        /// 부모 Stream 사용 여부를 Main/Sub Stream 사용 여부에 반영한다.
+        /// 
+        /// 현재 설정 화면에서는 Main/Sub 개별 사용 체크를 제공하지 않으므로,
+        /// 부모 Stream의 IsEnabled 값이 Main/Sub의 사용 여부를 결정한다.
+        /// </summary>
+        private void ApplyStreamQualityEnabledPolicy(StreamConfig stream)
+        {
+            if (stream == null)
+                return;
+
+            string basePath = stream.RtspPath;
+
+            if (string.IsNullOrWhiteSpace(basePath))
+            {
+                basePath = stream.StreamNo == 0
+                    ? "poscam"
+                    : "poscam_" + stream.StreamNo;
+
+                stream.RtspPath = basePath;
+            }
+
+            if (stream.MainStream == null)
+                stream.MainStream = StreamQualityConfig.CreateMain(basePath);
+
+            if (stream.SubStream == null)
+                stream.SubStream = StreamQualityConfig.CreateSub(basePath + "_sub");
+
+            stream.MainStream.IsEnabled = stream.IsEnabled;
+            stream.SubStream.IsEnabled = stream.IsEnabled;
         }
     }
 }

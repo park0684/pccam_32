@@ -99,6 +99,13 @@ namespace pccam_32.Views
                     mainStream.RtspPath = rtspPath;
                     subStream.RtspPath = rtspPath + "_sub";
 
+                    /*
+                     * 화면에는 Main/Sub 개별 사용 체크가 없으므로
+                     * 부모 Stream 체크 상태를 Main/Sub에도 반영한다.
+                     */
+                    mainStream.IsEnabled = _chkUse[i].Checked;
+                    subStream.IsEnabled = _chkUse[i].Checked;
+
                     mainStream.Fps = ToInt(Convert.ToString(_cboFps[i].SelectedItem), mainStream.Fps);
                     mainStream.Bitrate = Convert.ToString(_cboBitrate[i].SelectedItem);
 

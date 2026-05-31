@@ -164,6 +164,12 @@ namespace pccam_32.Services
 
         /// <summary>
         /// 기본 설정값의 유효성을 검사한다.
+        /// 
+        /// 정책:
+        /// - Stream0은 필수 사용 대상이 아니다.
+        /// - 사용자가 보조 모니터(Stream1)만 선택할 수 있다.
+        /// - 비활성 Stream은 송출 대상이 아니므로 상세 검증하지 않는다.
+        /// - 활성 Stream이 하나도 없을 때만 자동 송출 경고를 표시한다.
         /// </summary>
         /// <param name="config">현재 설정.</param>
         /// <param name="result">검사 결과 객체.</param>
@@ -183,28 +189,93 @@ namespace pccam_32.Services
                 return;
             }
 
+            int enabledStreamCount = 0;
+
             foreach (StreamConfig stream in config.Streams)
             {
                 if (stream == null)
                     continue;
 
-                if (stream.StreamNo == 0 && !stream.IsEnabled)
-                    result.AddWarning("Stream0이 비활성화되어 있습니다. 자동 송출이 시작되지 않을 수 있습니다.");
+                /*
+                 * 비활성 Stream은 실제 송출 대상이 아니다.
+                 * 따라서 ScreenName, FPS, Bitrate, RTSP, ONVIF 포트 검증에서 제외한다.
+                 * 
+                 * 예:
+                 * - Stream0 미사용
+                 * - Stream1 사용
+                 * 
+                 * 위 구성은 정상 허용되어야 한다.
+                 */
+                if (!stream.IsEnabled)
+                    continue;
+
+                enabledStreamCount++;
 
                 if (string.IsNullOrWhiteSpace(stream.ScreenName))
-                    result.AddWarning("화면명이 비어 있습니다. StreamNo=" + stream.StreamNo);
+                {
+                    result.AddWarning(
+                        "모니터 장치명이 비어 있습니다. StreamNo=" + stream.StreamNo);
+                }
 
                 if (stream.Fps <= 0)
-                    result.AddError("FPS 값이 올바르지 않습니다. StreamNo=" + stream.StreamNo);
+                {
+                    result.AddError(
+                        "FPS 값이 올바르지 않습니다. StreamNo=" + stream.StreamNo);
+                }
 
                 if (string.IsNullOrWhiteSpace(stream.Bitrate))
-                    result.AddError("Bitrate 값이 비어 있습니다. StreamNo=" + stream.StreamNo);
+                {
+                    result.AddError(
+                        "Bitrate 값이 비어 있습니다. StreamNo=" + stream.StreamNo);
+                }
 
                 if (string.IsNullOrWhiteSpace(stream.RtspPath))
-                    result.AddError("RTSP 경로가 비어 있습니다. StreamNo=" + stream.StreamNo);
+                {
+                    result.AddError(
+                        "RTSP 경로가 비어 있습니다. StreamNo=" + stream.StreamNo);
+                }
 
                 if (stream.OnvifPort <= 0 || stream.OnvifPort > 65535)
-                    result.AddError("ONVIF 포트 값이 올바르지 않습니다. StreamNo=" + stream.StreamNo);
+                {
+                    result.AddError(
+                        "ONVIF 포트 값이 올바르지 않습니다. StreamNo=" + stream.StreamNo);
+                }
+
+                /*
+                 * 현재 설정 화면에는 Main/Sub 개별 사용 체크가 없다.
+                 * 따라서 부모 Stream이 사용이면 Main/Sub도 사용 상태여야 한다.
+                 */
+                if (stream.MainStream == null)
+                {
+                    result.AddError(
+                        "Main Stream 설정이 없습니다. StreamNo=" + stream.StreamNo);
+                }
+                else if (!stream.MainStream.IsEnabled)
+                {
+                    result.AddWarning(
+                        "Main Stream이 비활성화되어 있습니다. StreamNo=" + stream.StreamNo);
+                }
+
+                if (stream.SubStream == null)
+                {
+                    result.AddError(
+                        "Sub Stream 설정이 없습니다. StreamNo=" + stream.StreamNo);
+                }
+                else if (!stream.SubStream.IsEnabled)
+                {
+                    result.AddWarning(
+                        "Sub Stream이 비활성화되어 있습니다. StreamNo=" + stream.StreamNo);
+                }
+            }
+
+            /*
+             * Stream0이 꺼져 있는 것은 문제가 아니다.
+             * 사용 체크된 Stream이 하나도 없을 때만 경고한다.
+             */
+            if (enabledStreamCount == 0)
+            {
+                result.AddWarning(
+                    "사용 체크된 모니터가 없습니다. 자동 송출이 시작되지 않습니다.");
             }
 
             if (config.RtspServer == null)

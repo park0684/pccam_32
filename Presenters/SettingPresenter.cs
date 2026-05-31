@@ -299,14 +299,12 @@ namespace pccam_32.Presenters
         }
 
         /// <summary>
-        /// 설정값의 유효성을 검증한다.
+        /// 설정값을 검증한다.
         /// 
-        /// 스트림, ONVIF 계정, 장비명 등 필수 값이 비어 있거나
-        /// 포트/FPS 값이 잘못된 경우 예외를 발생시킨다.
+        /// 주 모니터(Stream0)가 반드시 선택될 필요는 없다.
+        /// 사용자가 보조 모니터만 송출할 수도 있으므로,
+        /// 활성화된 Stream이 하나 이상인지 여부만 검사한다.
         /// </summary>
-        /// <param name="config">
-        /// 검증할 설정 객체.
-        /// </param>
         private void ValidateConfig(AppConfig config)
         {
             if (config == null)
@@ -315,48 +313,52 @@ namespace pccam_32.Presenters
             if (config.Streams == null || config.Streams.Count == 0)
                 throw new InvalidOperationException("스트림 설정이 없습니다.");
 
+            int enabledStreamCount = 0;
+
             foreach (StreamConfig stream in config.Streams)
             {
                 if (stream == null)
                     continue;
 
-                if (stream.OnvifPort <= 0 || stream.OnvifPort > 65535)
-                    throw new InvalidOperationException("ONVIF 포트는 1~65535 사이여야 합니다.");
+                /*
+                 * 비활성 Stream은 실제 송출 대상이 아니므로 검증하지 않는다.
+                 */
+                if (!stream.IsEnabled)
+                    continue;
 
-                if (stream.Fps <= 0)
-                    throw new InvalidOperationException("FPS 값이 올바르지 않습니다.");
-
-                if (string.IsNullOrWhiteSpace(stream.Bitrate))
-                    throw new InvalidOperationException("Bitrate 값이 비어 있습니다.");
+                enabledStreamCount++;
 
                 if (string.IsNullOrWhiteSpace(stream.ScreenName))
-                    throw new InvalidOperationException("모니터 장치명이 비어 있습니다. 모니터 설정을 다시 확인하세요.");
-
-                if (string.IsNullOrWhiteSpace(stream.DisplayName))
                 {
-                    stream.DisplayName = stream.StreamNo == 0
-                        ? "주 모니터"
-                        : "보조 모니터";
+                    throw new InvalidOperationException(
+                        "Stream" + stream.StreamNo + "의 모니터 장치명이 비어 있습니다. 모니터 설정을 다시 확인하세요.");
                 }
 
                 if (string.IsNullOrWhiteSpace(stream.RtspPath))
-                    throw new InvalidOperationException("RTSP 경로가 비어 있습니다.");
+                {
+                    throw new InvalidOperationException(
+                        "Stream" + stream.StreamNo + "의 RTSP 경로가 비어 있습니다.");
+                }
+
+                if (stream.OnvifPort <= 0)
+                {
+                    throw new InvalidOperationException(
+                        "Stream" + stream.StreamNo + "의 ONVIF 포트가 올바르지 않습니다.");
+                }
 
                 ValidateStreamQuality(stream, stream.MainStream, "MainStream");
                 ValidateStreamQuality(stream, stream.SubStream, "SubStream");
             }
 
-            if (config.Onvif == null)
-                throw new InvalidOperationException("ONVIF 설정이 없습니다.");
-
-            if (string.IsNullOrWhiteSpace(config.Onvif.UserId))
-                throw new InvalidOperationException("ONVIF ID를 입력하세요.");
-
-            if (config.Auth == null)
-                throw new InvalidOperationException("인증 설정이 없습니다.");
-
-            if (string.IsNullOrWhiteSpace(config.Auth.DeviceName))
-                throw new InvalidOperationException("장비명을 입력하세요.");
+            /*
+             * Stream0이 필수인 것이 아니라,
+             * 사용 체크된 Stream이 하나 이상이어야 한다.
+             */
+            if (enabledStreamCount == 0)
+            {
+                throw new InvalidOperationException(
+                    "송출할 모니터를 하나 이상 선택하세요.");
+            }
         }
 
         /// <summary>
@@ -371,30 +373,44 @@ namespace pccam_32.Presenters
                 return;
 
             /*
-             * 부모 Stream이 비활성화된 경우 Main/Sub는 실제 사용되지 않으므로
-             * 강하게 검증하지 않는다.
+             * 부모 Stream이 비활성화된 경우에는 검증하지 않는다.
              */
             if (!parentStream.IsEnabled)
                 return;
 
             if (quality == null)
+            {
                 throw new InvalidOperationException(
                     "Stream" + parentStream.StreamNo + " " + qualityName + " 설정이 없습니다.");
+            }
 
+            /*
+             * 현재 UI에서는 Main/Sub 개별 사용 여부를 관리하지 않는다.
+             * 부모 Stream이 사용이면 Main/Sub도 사용 상태여야 한다.
+             */
             if (!quality.IsEnabled)
-                return;
+            {
+                throw new InvalidOperationException(
+                    "Stream" + parentStream.StreamNo + " " + qualityName + " 사용 설정이 꺼져 있습니다.");
+            }
 
             if (quality.Fps <= 0)
+            {
                 throw new InvalidOperationException(
                     "Stream" + parentStream.StreamNo + " " + qualityName + " FPS 값이 올바르지 않습니다.");
+            }
 
             if (string.IsNullOrWhiteSpace(quality.Bitrate))
+            {
                 throw new InvalidOperationException(
                     "Stream" + parentStream.StreamNo + " " + qualityName + " Bitrate 값이 비어 있습니다.");
+            }
 
             if (string.IsNullOrWhiteSpace(quality.RtspPath))
+            {
                 throw new InvalidOperationException(
                     "Stream" + parentStream.StreamNo + " " + qualityName + " RTSP 경로가 비어 있습니다.");
+            }
         }
 
         /// <summary>
