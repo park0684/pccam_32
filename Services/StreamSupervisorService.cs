@@ -35,7 +35,7 @@ namespace pccam_32.Services
         private AppConfig _currentConfig;
         private StreamRuntimeStatus _status = StreamRuntimeStatus.Stopped;
         private bool _disposed;
-
+        private readonly StreamRuntimeConfigApplier _runtimeConfigApplier =  new StreamRuntimeConfigApplier();
         /// <summary>
         /// 로그 수신 이벤트.
         /// Presenter 또는 LogService에서 구독한다.
@@ -234,6 +234,16 @@ namespace pccam_32.Services
                     throw new InvalidOperationException("활성화된 스트림 설정이 없습니다.");
 
                 RaiseLog("활성 스트림 수: " + enabledStreamCount);
+
+                /*
+                 * ONVIF 서버를 시작하기 전에 실제 모니터 해상도를 StreamConfig에 반영한다.
+                 * 
+                 * 이유:
+                 * - ONVIF GetProfiles / GetVideoEncoderConfigurationOptions는 config.Streams 값을 보고 응답한다.
+                 * - FFmpeg BuildArguments 안에서 해상도를 보정하면 이미 ONVIF 서버가 시작된 뒤라 늦을 수 있다.
+                 * - 따라서 MediaMTX / ONVIF / FFmpeg 시작 전에 먼저 런타임 해상도를 확정한다.
+                 */
+                ApplyRuntimeStreamConfig(config);
 
                 /*
                  * 4. MediaMTX 실행.
@@ -846,6 +856,53 @@ namespace pccam_32.Services
             catch (Exception ex)
             {
                 RaiseLog("실행 중 인증 실패 후 송출 중지 오류: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// 송출 시작 전에 런타임 스트림 설정을 보정한다.
+        /// 
+        /// MainStream.Width / Height가 0인 경우,
+        /// 실제 캡처 대상 모니터의 해상도 값을 반영한다.
+        /// 
+        /// 이 메서드는 반드시 ONVIF HTTP 서버 시작 전에 호출되어야 한다.
+        /// 그래야 NVR이 ONVIF로 조회하는 설정 해상도와 실제 RTSP 송출 해상도가 일치한다.
+        /// </summary>
+        /// <param name="config">현재 PC CAM 설정.</param>
+        private void ApplyRuntimeStreamConfig(AppConfig config)
+        {
+            if (config == null || config.Streams == null)
+                return;
+
+            foreach (StreamConfig stream in config.Streams)
+            {
+                if (stream == null)
+                    continue;
+
+                if (!stream.IsEnabled)
+                    continue;
+
+                MonitorInfo monitor = _monitorService.GetMonitorForStream(stream);
+
+                if (monitor == null)
+                {
+                    throw new InvalidOperationException(
+                        "송출 대상 모니터를 찾을 수 없습니다. " +
+                        "StreamNo=" + stream.StreamNo +
+                        ", MonitorRole=" + stream.MonitorRole +
+                        ", ScreenName=" + stream.ScreenName);
+                }
+
+                _runtimeConfigApplier.Apply(
+                    stream,
+                    monitor);
+
+                RaiseLog(
+                    "런타임 스트림 해상도 적용. " +
+                    "StreamNo=" + stream.StreamNo +
+                    ", Monitor=" + monitor.DisplayText +
+                    ", Main=" + stream.MainStream.Width + "x" + stream.MainStream.Height +
+                    ", Sub=" + stream.SubStream.Width + "x" + stream.SubStream.Height);
             }
         }
     }

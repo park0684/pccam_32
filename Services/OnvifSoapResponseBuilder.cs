@@ -684,18 +684,22 @@ namespace pccam_32.Services
             string profileName =
                 BuildProfileName(stream, normalizedQualityName);
 
-            int width = quality.Width;
-            int height = quality.Height;
-
             /*
-             * MainStream은 Width/Height가 0일 수 있다.
-             * ONVIF Profile 응답에는 해상도 값이 필요하므로 기본값을 사용한다.
+             * 해상도는 하드코딩하지 않는다.
+             * 실제 화면 해상도는 송출 시작 전에
+             * StreamConfig.MainStream.Width / Height에 반영되어 있어야 한다.
              */
-            if (width <= 0)
-                width = 1920;
+            int width = ResolveOnvifResolutionValue(
+                quality.Width,
+                stream,
+                normalizedQualityName,
+                "Width");
 
-            if (height <= 0)
-                height = 1080;
+            int height = ResolveOnvifResolutionValue(
+                quality.Height,
+                stream,
+                normalizedQualityName,
+                "Height");
 
             int fps = quality.Fps > 0
                 ? quality.Fps
@@ -741,9 +745,14 @@ namespace pccam_32.Services
             sb.Append("<tt:EncodingInterval>1</tt:EncodingInterval>");
             sb.Append("<tt:BitrateLimit>" + bitrateLimit + "</tt:BitrateLimit>");
             sb.Append("</tt:RateControl>");
+            sb.Append("<tt:H264>");
+            sb.Append("<tt:GovLength>" + fps + "</tt:GovLength>");
+            sb.Append("<tt:H264Profile>Baseline</tt:H264Profile>");
+            sb.Append("</tt:H264>");
             sb.Append("</tt:VideoEncoderConfiguration>");
 
             sb.Append("</trt:Profiles>");
+
         }
 
         /// <summary>
@@ -809,6 +818,58 @@ namespace pccam_32.Services
         }
 
         /// <summary>
+        /// VideoEncoderConfiguration token에서 StreamNo를 추출한다.
+        /// 
+        /// 예상 형식:
+        /// - video_encoder_0_main
+        /// - video_encoder_0_sub
+        /// 
+        /// 토큰 형식이 맞지 않으면 fallbackStreamNo를 반환한다.
+        /// </summary>
+        /// <param name="configurationToken">VideoEncoderConfiguration token.</param>
+        /// <param name="fallbackStreamNo">추출 실패 시 사용할 기본 StreamNo.</param>
+        /// <returns>StreamNo.</returns>
+        private int ParseStreamNoFromConfigurationToken(
+            string configurationToken,
+            int fallbackStreamNo)
+        {
+            if (string.IsNullOrWhiteSpace(configurationToken))
+                return fallbackStreamNo;
+
+            string[] parts = configurationToken.Split('_');
+
+            /*
+             * video_encoder_0_main
+             * [0] video
+             * [1] encoder
+             * [2] 0
+             * [3] main
+             */
+            if (parts.Length >= 3)
+            {
+                int streamNo;
+
+                if (int.TryParse(parts[2], out streamNo))
+                    return streamNo;
+            }
+
+            return fallbackStreamNo;
+        }
+
+        /// <summary>
+        /// VideoEncoderConfiguration token이 SubStream을 가리키는지 확인한다.
+        /// </summary>
+        /// <param name="configurationToken">VideoEncoderConfiguration token.</param>
+        /// <returns>SubStream token이면 true.</returns>
+        private bool IsSubConfigurationToken(string configurationToken)
+        {
+            if (string.IsNullOrWhiteSpace(configurationToken))
+                return false;
+
+            return configurationToken.IndexOf("_sub", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        /// <summary>
         /// ProfileToken이 SubStream을 가리키는지 확인한다.
         /// </summary>
         private bool IsSubProfileToken(string profileToken)
@@ -864,6 +925,252 @@ namespace pccam_32.Services
             }
 
             return 0;
+        }
+
+        /// <summary>
+        /// ONVIF GetVideoEncoderConfigurationOptions 요청에 대한 응답 XML을 생성한다.
+        /// 
+        /// NVR은 장비 등록 과정에서 VideoEncoderConfiguration token을 기준으로
+        /// 해당 스트림이 지원하는 해상도, FPS, GOP, H.264 Profile 범위를 조회한다.
+        /// 
+        /// PC CAM은 ONVIF로 설정 변경을 받는 장비가 아니라 읽기 전용 가상 카메라에 가깝기 때문에,
+        /// 현재 설정값을 기준으로 최소 호환 가능한 옵션 범위를 반환한다.
+        /// </summary>
+        /// <param name="config">현재 PC CAM 설정.</param>
+        /// <param name="configurationToken">NVR이 요청한 VideoEncoderConfiguration token.</param>
+        /// <param name="fallbackStreamNo">토큰에서 StreamNo를 찾지 못할 때 사용할 기본 StreamNo.</param>
+        /// <returns>GetVideoEncoderConfigurationOptions SOAP 응답 XML.</returns>
+        public string BuildGetVideoEncoderConfigurationOptionsResponse(
+            AppConfig config,
+            string configurationToken,
+            int fallbackStreamNo)
+        {
+            int streamNo = ParseStreamNoFromConfigurationToken(configurationToken, fallbackStreamNo);
+            bool isSub = IsSubConfigurationToken(configurationToken);
+
+            StreamConfig stream = FindStream(config, streamNo);
+
+            if (stream == null)
+                stream = CreateFallbackStream(streamNo);
+
+            StreamQualityConfig quality;
+
+            if (isSub)
+                quality = stream.SubStream ?? StreamQualityConfig.CreateSub(stream.RtspPath + "_sub");
+            else
+                quality = stream.MainStream ?? StreamQualityConfig.CreateMain(stream.RtspPath);
+            /*
+             * 해상도는 하드코딩하지 않는다.
+             * FFmpeg 송출 시작 전에 실제 MonitorInfo 해상도가 MainStream.Width/Height에 반영되어 있어야 한다.
+             */
+            int width = ResolveOnvifResolutionValue(
+                quality.Width,
+                stream,
+                isSub ? "sub" : "main",
+                "Width");
+
+            int height = ResolveOnvifResolutionValue(
+                quality.Height,
+                stream,
+                isSub ? "sub" : "main",
+                "Height");
+
+            int fps = quality.Fps > 0 ? quality.Fps : stream.Fps;
+
+            if (fps <= 0)
+                fps = isSub ? 5 : 10;
+
+            int bitrateKbps = ParseBitrateKbps(quality.Bitrate);
+
+            if (bitrateKbps <= 0)
+                bitrateKbps = ParseBitrateKbps(stream.Bitrate);
+
+            if (bitrateKbps <= 0)
+                bitrateKbps = isSub ? 500 : 2000;
+
+            /*
+             * NVR이 선택 가능한 범위를 보는 값이다.
+             * 실제 PC CAM이 ONVIF SetVideoEncoderConfiguration을 지원하지 않는 단계라면
+             * 너무 넓은 범위를 주기보다 현재 설정값 중심의 안전한 범위를 준다.
+             */
+            int minFps = 1;
+            int maxFps = fps < 1 ? 10 : Math.Max(fps, 10);
+
+            int minBitrate = isSub ? 100 : 300;
+            int maxBitrate = Math.Max(bitrateKbps, isSub ? 1000 : 3000);
+
+            StringBuilder sb = new StringBuilder();
+
+            sb.Append(CreateEnvelopeStart());
+
+            sb.Append("<trt:GetVideoEncoderConfigurationOptionsResponse>");
+            sb.Append("<trt:Options>");
+
+            sb.Append("<tt:QualityRange>");
+            sb.Append("<tt:Min>1</tt:Min>");
+            sb.Append("<tt:Max>10</tt:Max>");
+            sb.Append("</tt:QualityRange>");
+
+            sb.Append("<tt:H264>");
+
+            sb.Append("<tt:ResolutionsAvailable>");
+            sb.Append("<tt:Width>" + width + "</tt:Width>");
+            sb.Append("<tt:Height>" + height + "</tt:Height>");
+            sb.Append("</tt:ResolutionsAvailable>");
+
+            sb.Append("<tt:GovLengthRange>");
+            sb.Append("<tt:Min>1</tt:Min>");
+            sb.Append("<tt:Max>" + maxFps + "</tt:Max>");
+            sb.Append("</tt:GovLengthRange>");
+
+            sb.Append("<tt:FrameRateRange>");
+            sb.Append("<tt:Min>" + minFps + "</tt:Min>");
+            sb.Append("<tt:Max>" + maxFps + "</tt:Max>");
+            sb.Append("</tt:FrameRateRange>");
+
+            sb.Append("<tt:EncodingIntervalRange>");
+            sb.Append("<tt:Min>1</tt:Min>");
+            sb.Append("<tt:Max>1</tt:Max>");
+            sb.Append("</tt:EncodingIntervalRange>");
+
+            sb.Append("<tt:H264ProfilesSupported>Baseline</tt:H264ProfilesSupported>");
+            sb.Append("<tt:H264ProfilesSupported>Main</tt:H264ProfilesSupported>");
+
+            sb.Append("</tt:H264>");
+
+            /*
+             * 일부 NVR은 Extension/H264 하위의 BitrateRange를 참조한다.
+             * 표준 구현체마다 차이가 있어 최소 호환성을 위해 Extension에도 같은 범위를 제공한다.
+             */
+            sb.Append("<tt:Extension>");
+            sb.Append("<tt:H264>");
+
+            sb.Append("<tt:ResolutionsAvailable>");
+            sb.Append("<tt:Width>" + width + "</tt:Width>");
+            sb.Append("<tt:Height>" + height + "</tt:Height>");
+            sb.Append("</tt:ResolutionsAvailable>");
+
+            sb.Append("<tt:GovLengthRange>");
+            sb.Append("<tt:Min>1</tt:Min>");
+            sb.Append("<tt:Max>" + maxFps + "</tt:Max>");
+            sb.Append("</tt:GovLengthRange>");
+
+            sb.Append("<tt:FrameRateRange>");
+            sb.Append("<tt:Min>" + minFps + "</tt:Min>");
+            sb.Append("<tt:Max>" + maxFps + "</tt:Max>");
+            sb.Append("</tt:FrameRateRange>");
+
+            sb.Append("<tt:EncodingIntervalRange>");
+            sb.Append("<tt:Min>1</tt:Min>");
+            sb.Append("<tt:Max>1</tt:Max>");
+            sb.Append("</tt:EncodingIntervalRange>");
+
+            sb.Append("<tt:BitrateRange>");
+            sb.Append("<tt:Min>" + minBitrate + "</tt:Min>");
+            sb.Append("<tt:Max>" + maxBitrate + "</tt:Max>");
+            sb.Append("</tt:BitrateRange>");
+
+            sb.Append("<tt:H264ProfilesSupported>Baseline</tt:H264ProfilesSupported>");
+            sb.Append("<tt:H264ProfilesSupported>Main</tt:H264ProfilesSupported>");
+
+            sb.Append("</tt:H264>");
+            sb.Append("</tt:Extension>");
+
+            sb.Append("</trt:Options>");
+            sb.Append("</trt:GetVideoEncoderConfigurationOptionsResponse>");
+
+            sb.Append(CreateEnvelopeEnd());
+
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// ONVIF GetNetworkInterfaces 요청에 대한 응답 XML을 생성한다.
+        /// 
+        /// NVR은 장비 등록 과정에서 장비의 네트워크 인터페이스와 IP 정보를 조회할 수 있다.
+        /// PC CAM은 실제 IP 카메라가 아니므로, ONVIF 서비스 접근에 사용된 host 값을 기준으로
+        /// 최소 IPv4 인터페이스 정보를 반환한다.
+        /// </summary>
+        /// <param name="host">NVR이 접근 가능한 PC CAM 호스트 주소.</param>
+        /// <returns>GetNetworkInterfaces SOAP 응답 XML.</returns>
+        public string BuildGetNetworkInterfacesResponse(string host)
+        {
+            string ipAddress = NormalizeHost(host);
+
+            StringBuilder sb = new StringBuilder();
+
+            sb.Append(CreateEnvelopeStart());
+
+            sb.Append("<tds:GetNetworkInterfacesResponse>");
+            sb.Append("<tds:NetworkInterfaces token=\"eth0\">");
+
+            sb.Append("<tt:Enabled>true</tt:Enabled>");
+
+            sb.Append("<tt:Info>");
+            sb.Append("<tt:Name>eth0</tt:Name>");
+            sb.Append("<tt:HwAddress>00:00:00:00:00:00</tt:HwAddress>");
+            sb.Append("<tt:MTU>1500</tt:MTU>");
+            sb.Append("</tt:Info>");
+
+            sb.Append("<tt:IPv4>");
+            sb.Append("<tt:Enabled>true</tt:Enabled>");
+            sb.Append("<tt:Config>");
+
+            sb.Append("<tt:Manual>");
+            sb.Append("<tt:Address>" + XmlEscape(ipAddress) + "</tt:Address>");
+            sb.Append("<tt:PrefixLength>24</tt:PrefixLength>");
+            sb.Append("</tt:Manual>");
+
+            sb.Append("<tt:DHCP>false</tt:DHCP>");
+
+            sb.Append("</tt:Config>");
+            sb.Append("</tt:IPv4>");
+
+            sb.Append("<tt:IPv6>");
+            sb.Append("<tt:Enabled>false</tt:Enabled>");
+            sb.Append("</tt:IPv6>");
+
+            sb.Append("</tds:NetworkInterfaces>");
+            sb.Append("</tds:GetNetworkInterfacesResponse>");
+
+            sb.Append(CreateEnvelopeEnd());
+
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// ONVIF 응답에 사용할 해상도 값을 확정한다.
+        /// 
+        /// 이 메서드에서는 해상도를 하드코딩하지 않는다.
+        /// 실제 해상도는 송출 시작 전 Runtime 단계에서
+        /// StreamConfig.MainStream.Width / Height에 반영되어 있어야 한다.
+        /// 
+        /// 값이 아직 0이면 Runtime 해상도 반영이 누락된 것이므로 예외로 처리한다.
+        /// </summary>
+        /// <param name="value">Width 또는 Height 값.</param>
+        /// <param name="stream">상위 Stream 설정.</param>
+        /// <param name="qualityName">main 또는 sub.</param>
+        /// <param name="fieldName">Width 또는 Height.</param>
+        /// <returns>ONVIF 응답에 사용할 해상도 값.</returns>
+        private int ResolveOnvifResolutionValue(
+            int value,
+            StreamConfig stream,
+            string qualityName,
+            string fieldName)
+        {
+            if (value > 0)
+                return value;
+
+            string streamText = stream == null
+                ? "Unknown"
+                : stream.StreamNo.ToString();
+
+            throw new InvalidOperationException(
+                "ONVIF 해상도 값이 적용되지 않았습니다. " +
+                "StreamNo=" + streamText +
+                ", Quality=" + qualityName +
+                ", Field=" + fieldName +
+                ". 송출 시작 전에 실제 MonitorInfo 해상도를 StreamConfig에 반영해야 합니다.");
         }
     }
 }

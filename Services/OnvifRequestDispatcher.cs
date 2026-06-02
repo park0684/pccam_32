@@ -93,6 +93,33 @@ namespace pccam_32.Services
                     profileToken);
             }
 
+            if (string.Equals(actionName, "GetVideoEncoderConfigurationOptions", StringComparison.OrdinalIgnoreCase))
+            {
+                /*
+                 * NVR이 GetProfiles에서 받은 VideoEncoderConfiguration token을 기준으로
+                 * 해당 스트림의 인코딩 가능 옵션을 조회한다.
+                 *
+                 * 예:
+                 * - video_encoder_0_main
+                 * - video_encoder_0_sub
+                 */
+                string configurationToken = ExtractConfigurationToken(requestBody, streamNo);
+
+                return _responseBuilder.BuildGetVideoEncoderConfigurationOptionsResponse(
+                    config,
+                    configurationToken,
+                    streamNo);
+            }
+
+            if (string.Equals(actionName, "GetNetworkInterfaces", StringComparison.OrdinalIgnoreCase))
+            {
+                /*
+                 * NVR이 장비 등록 검증 과정에서 네트워크 인터페이스 정보를 조회한다.
+                 * PC CAM은 실제 IP 카메라는 아니지만, ONVIF 장비로 인식되기 위한
+                 * 최소 네트워크 정보를 반환한다.
+                 */
+                return _responseBuilder.BuildGetNetworkInterfacesResponse(host);
+            }
             return _responseBuilder.BuildSoapFault("지원하지 않는 ONVIF 요청입니다.");
         }
 
@@ -142,6 +169,12 @@ namespace pccam_32.Services
             if (ContainsAction(requestBody, "GetStreamUri"))
                 return "GetStreamUri";
 
+            if (ContainsAction(requestBody, "GetVideoEncoderConfigurationOptions"))
+                return "GetVideoEncoderConfigurationOptions";
+
+            if (ContainsAction(requestBody, "GetNetworkInterfaces"))
+                return "GetNetworkInterfaces";
+
             return "Unknown";
         }
 
@@ -175,6 +208,36 @@ namespace pccam_32.Services
 
             if (string.IsNullOrWhiteSpace(token))
                 return "profile_" + streamNo + "_main";
+
+            return token.Trim();
+        }
+
+        /// <summary>
+        /// GetVideoEncoderConfigurationOptions 요청 본문에서 ConfigurationToken 값을 추출한다.
+        /// 
+        /// NVR은 보통 GetProfiles 응답에 포함된 VideoEncoderConfiguration token을
+        /// ConfigurationToken으로 다시 전달한다.
+        /// 
+        /// 예:
+        /// - video_encoder_0_main
+        /// - video_encoder_0_sub
+        /// 
+        /// 토큰을 찾지 못하면 현재 ONVIF 포트의 streamNo 기준 Main encoder token을 반환한다.
+        /// </summary>
+        /// <param name="requestBody">HTTP 요청 본문 SOAP XML.</param>
+        /// <param name="streamNo">현재 ONVIF 포트에 연결된 Stream 번호.</param>
+        /// <returns>VideoEncoderConfiguration token 값.</returns>
+        private string ExtractConfigurationToken(
+            string requestBody,
+            int streamNo)
+        {
+            if (string.IsNullOrWhiteSpace(requestBody))
+                return "video_encoder_" + streamNo + "_main";
+
+            string token = ExtractXmlElementValue(requestBody, "ConfigurationToken");
+
+            if (string.IsNullOrWhiteSpace(token))
+                return "video_encoder_" + streamNo + "_main";
 
             return token.Trim();
         }
@@ -255,5 +318,7 @@ namespace pccam_32.Services
 
             return source.Substring(startIndex, endIndex - startIndex);
         }
+
+
     }
 }

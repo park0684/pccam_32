@@ -132,6 +132,7 @@
     <Compile Include="Services\RtspServerService.cs" />
     <Compile Include="Services\RuntimeAuthMonitorService.cs" />
     <Compile Include="Services\StartupValidationService.cs" />
+    <Compile Include="Services\StreamRuntimeConfigApplier.cs" />
     <Compile Include="Services\StreamSupervisorService.cs" />
     <Compile Include="Views\ISettingView.cs" />
     <Compile Include="Views\ITrayView.cs" />

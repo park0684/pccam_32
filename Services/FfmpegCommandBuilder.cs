@@ -42,12 +42,28 @@ namespace pccam_32.Services
 
             ValidateMonitorInfo(monitorInfo);
             ValidateRtspServerConfig(rtspServerConfig);
+            /*
+             * Main/Sub 설정 객체를 먼저 streamConfig에 확정한다.
+             * 
+             * 기존처럼 지역 변수에만 CreateMain/CreateSub를 넣으면
+             * ONVIF 응답 생성 쪽에서는 해당 값이 반영되지 않을 수 있다.
+             */
+            EnsureStreamQualityConfigs(streamConfig);
 
-            StreamQualityConfig mainStream =
-                streamConfig.MainStream ?? StreamQualityConfig.CreateMain(streamConfig.RtspPath);
+            /*
+             * 실제 캡처 대상 모니터 해상도를 MainStream 해상도에 반영한다.
+             * 
+             * MainStream.Width/Height가 0이면 "원본 해상도 유지" 의미이므로,
+             * 실제 MonitorInfo.BoundsWidth / BoundsHeight 값을 넣어준다.
+             * 
+             * 이렇게 해야 FFmpeg 실제 송출 해상도와 ONVIF 설정 응답 해상도가 일치한다.
+             */
+            ApplyActualMonitorResolution(
+                streamConfig,
+                monitorInfo);
 
-            StreamQualityConfig subStream =
-                streamConfig.SubStream ?? StreamQualityConfig.CreateSub(streamConfig.RtspPath + "_sub");
+            StreamQualityConfig mainStream = streamConfig.MainStream;
+            StreamQualityConfig subStream = streamConfig.SubStream;
 
             bool useMain =
                 streamConfig.IsEnabled &&
@@ -71,8 +87,8 @@ namespace pccam_32.Services
             /*
              * 캡처 FPS는 활성화된 출력 중 가장 높은 FPS를 사용한다.
              * 예:
-             * Main 30fps, Sub 5fps → 화면 캡처 30fps
-             * Sub는 filter_complex에서 fps 필터로 낮춘다.
+             * Main 10fps, Sub 5fps → 화면 캡처 10fps
+             * Sub는 filter_complex에서 fps 필터로 5fps까지 낮춘다.
              */
             int captureFps = GetCaptureFps(mainStream, subStream, useMain, useSub);
 
@@ -86,10 +102,11 @@ namespace pccam_32.Services
                 "-i desktop ";
 
             /*
-             * Main/Sub 둘 다 사용하는 경우:
-             * 입력 화면을 split 한 뒤
-             * Main은 원본 기준으로 송출하고,
-             * Sub는 fps/scale 필터를 적용해서 저화질 송출한다.
+             * Main/Sub 둘 다 사용하는 경우.
+             * 
+             * 입력 화면을 split 한 뒤,
+             * Main/Sub 모두 fps 필터를 적용한다.
+             * 이렇게 해야 실제 스트리밍 FPS가 설정 FPS를 초과하지 않는다.
              */
             if (useMain && useSub)
             {
@@ -107,8 +124,10 @@ namespace pccam_32.Services
                     subStream.RtspPath,
                     rtspServerConfig);
 
-                string filterComplex =
-                    BuildMainSubFilterComplex(subStream);
+                string filterComplex = BuildMainSubFilterComplex(
+                    mainStream,
+                    subStream,
+                    monitorInfo);
 
                 string arguments =
                     inputOptions +
@@ -140,8 +159,13 @@ namespace pccam_32.Services
                     mainStream.RtspPath,
                     rtspServerConfig);
 
+                string videoFilter = BuildVideoFilterOption(
+                    mainStream,
+                    monitorInfo);
+
                 string arguments =
                     inputOptions +
+                    videoFilter +
                     BuildCodecOptions(streamConfig, mainStream) + " " +
                     "-an " +
                     "-f rtsp " +
@@ -153,14 +177,19 @@ namespace pccam_32.Services
 
             /*
              * Sub만 사용하는 경우.
-             * 일반적인 기본값은 아니지만 설정상 가능하도록 처리한다.
+             * 
+             * 위에서 useMain && useSub, useMain 조건은 이미 처리되었으므로
+             * 여기까지 내려왔다면 useSub만 true인 상태다.
              */
+            if (useSub)
             {
                 string subUrl = BuildLocalRtspPublishUrl(
                     subStream.RtspPath,
                     rtspServerConfig);
 
-                string videoFilter = BuildSubOnlyVideoFilter(subStream);
+                string videoFilter = BuildVideoFilterOption(
+                    subStream,
+                    monitorInfo);
 
                 string arguments =
                     inputOptions +
@@ -173,6 +202,12 @@ namespace pccam_32.Services
 
                 return arguments;
             }
+
+            /*
+             * 이론상 여기까지 올 수 없지만,
+             * 컴파일러와 예외 흐름 명확성을 위해 마지막 방어 코드를 둔다.
+             */
+            throw new InvalidOperationException("FFmpeg Arguments를 생성할 수 없습니다.");
         }
 
 
@@ -196,61 +231,6 @@ namespace pccam_32.Services
                     "Main/Sub는 서로 다른 RtspPath를 사용해야 합니다. " +
                     "예: Main=poscam, Sub=poscam_sub");
             }
-        }
-        /// <summary>
-        /// Main/Sub 동시 출력용 filter_complex 값을 생성한다.
-        /// 
-        /// 입력:
-        /// [0:v]
-        /// 
-        /// 출력:
-        /// [mainout] → MainStream
-        /// [subout]  → SubStream
-        /// 
-        /// 주의:
-        /// FFmpeg filter_complex 안에서는 copy 필터를 사용할 수 없다.
-        /// 원본을 그대로 통과시키려면 null 필터를 사용한다.
-        /// </summary>
-        /// <param name="subStream">
-        /// SubStream 품질 설정.
-        /// </param>
-        /// <returns>
-        /// FFmpeg filter_complex 문자열.
-        /// </returns>
-        private string BuildMainSubFilterComplex(StreamQualityConfig subStream)
-        {
-            string subFilter = "fps=" + subStream.Fps;
-
-            if (subStream.Width > 0 && subStream.Height > 0)
-            {
-                subFilter += ",scale=" + subStream.Width + ":" + subStream.Height;
-            }
-
-            return
-                "[0:v]split=2[mainraw][subraw];" +
-                "[mainraw]null[mainout];" +
-                "[subraw]" + subFilter + "[subout]";
-        }
-
-        /// <summary>
-        /// SubStream만 출력할 때 사용할 비디오 필터 옵션을 생성한다.
-        /// </summary>
-        /// <param name="subStream">
-        /// SubStream 품질 설정.
-        /// </param>
-        /// <returns>
-        /// FFmpeg -vf 옵션 문자열.
-        /// </returns>
-        private string BuildSubOnlyVideoFilter(StreamQualityConfig subStream)
-        {
-            string filter = "fps=" + subStream.Fps;
-
-            if (subStream.Width > 0 && subStream.Height > 0)
-            {
-                filter += ",scale=" + subStream.Width + ":" + subStream.Height;
-            }
-
-            return "-vf \"" + filter + "\" ";
         }
 
         /// <summary>
@@ -276,55 +256,177 @@ namespace pccam_32.Services
         /// <summary>
         /// 코덱별 FFmpeg 옵션을 생성한다.
         /// 
-        /// Codec은 StreamConfig의 공통 Codec 값을 사용하고,
-        /// Bitrate는 Main/Sub 각각의 품질 설정값을 사용한다.
+        /// NVR 호환성을 위해 H.264 시간정보를 직접 조작하지 않고,
+        /// 일반적인 CFR 출력과 x264 파라미터로 고정 프레임레이트 스트림을 생성한다.
+        /// 
+        /// 정상 동작 채널과 유사하게 GOP는 FPS의 3배로 설정한다.
+        /// 예:
+        /// - 10fps → GOP 30
+        /// - 3fps  → GOP 9
         /// </summary>
+        /// <param name="streamConfig">상위 스트림 설정.</param>
+        /// <param name="quality">Main/Sub 품질 설정.</param>
+        /// <returns>FFmpeg 코덱 옵션 문자열.</returns>
         private string BuildCodecOptions(
             StreamConfig streamConfig,
             StreamQualityConfig quality)
         {
             string codec = streamConfig.Codec ?? "H264";
-            int gop = Math.Max(1, quality.Fps);
 
+            int fps = GetSafeFps(quality);
+
+            /*
+             * 정상 채널의 패턴이 10fps/GOP30, 3fps/GOP9이므로
+             * 우선 GOP를 FPS의 3배로 맞춘다.
+             */
+            int gop = Math.Max(1, fps * 3);
+
+            string bitrate = NormalizeBitrate(
+                quality == null ? "" : quality.Bitrate,
+                "1200k");
+
+            string bufferSize = BuildBufferSize(bitrate);
 
             if (string.Equals(codec, "H265", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(codec, "H.265", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(codec, "HEVC", StringComparison.OrdinalIgnoreCase))    
+                string.Equals(codec, "HEVC", StringComparison.OrdinalIgnoreCase))
             {
-                return
-                    "-vcodec libx265 " +
-                    "-preset ultrafast " +
-                    "-pix_fmt yuv420p " +
-                    "-g " + gop + " " +
-                    "-keyint_min " + gop + " " +
-                    "-sc_threshold 0 " +
-                    "-b:v " + quality.Bitrate;
+                return "-r " + fps + " " +
+                       "-fps_mode cfr " +
+                       "-vcodec libx265 " +
+                       "-preset ultrafast " +
+                       "-pix_fmt yuv420p " +
+                       "-g " + gop + " " +
+                       "-keyint_min " + gop + " " +
+                       "-sc_threshold 0 " +
+                       "-b:v " + bitrate + " " +
+                       "-maxrate " + bitrate + " " +
+                       "-bufsize " + bufferSize;
             }
 
-            /*
-             * H.264 기본 옵션.
-             * 
-             * -profile:v baseline
-             *   구형 장비 및 NVR 호환성을 우선한다.
-             *
-             * -tune zerolatency
-             *   실시간 송출 지연을 줄인다.
-             *
-             * -pix_fmt yuv420p
-             *   VLC/NVR 호환성을 높인다.
-             */
+            return "-r " + fps + " " +
+                   "-fps_mode cfr " +
+                   "-vcodec libx264 " +
+                   "-profile:v baseline " +
+                   "-level 3.1 " +
+                   "-preset ultrafast " +
+                   "-tune zerolatency " +
+                   "-pix_fmt yuv420p " +
+                   "-x264-params \"keyint=" + gop +
+                        ":min-keyint=" + gop +
+                        ":scenecut=0" +
+                        ":repeat-headers=1" +
+                        ":force-cfr=1\" " +
+                   "-g " + gop + " " +
+                   "-keyint_min " + gop + " " +
+                   "-sc_threshold 0 " +
+                   "-bf 0 " +
+                   "-b:v " + bitrate + " " +
+                   "-maxrate " + bitrate + " " +
+                   "-bufsize " + bufferSize;
+        }
 
-            return
-                "-vcodec libx264 " +
-                "-profile:v baseline " +
-                "-level 3.0 " +
-                "-preset ultrafast " +
-                "-tune zerolatency " +
-                "-pix_fmt yuv420p " +
-                "-g " + gop + " " +
-                "-keyint_min " + gop + " " +
-                "-sc_threshold 0 " +
-                "-b:v " + quality.Bitrate;
+
+
+        /// <summary>
+        /// 비트레이트 문자열을 FFmpeg에서 사용할 수 있는 형식으로 보정한다.
+        /// 
+        /// 예:
+        /// - 1200k → 1200k
+        /// - 2m → 2m
+        /// - 1200 → 1200k
+        /// </summary>
+        /// <param name="bitrate">사용자 설정 비트레이트.</param>
+        /// <param name="fallback">비어 있거나 잘못된 경우 사용할 기본값.</param>
+        /// <returns>FFmpeg 비트레이트 문자열.</returns>
+        private string NormalizeBitrate(
+            string bitrate,
+            string fallback)
+        {
+            if (string.IsNullOrWhiteSpace(bitrate))
+                return fallback;
+
+            string value = bitrate.Trim().ToLower();
+
+            if (value.EndsWith("k") || value.EndsWith("m"))
+                return value;
+
+            int raw;
+
+            if (int.TryParse(value, out raw))
+                return raw + "k";
+
+            return fallback;
+        }
+
+        /// <summary>
+        /// 비트레이트 기준으로 FFmpeg bufsize 값을 생성한다.
+        /// 
+        /// 일반적으로 CBR에 가깝게 유지하려면 bitrate의 2배 정도를 사용한다.
+        /// 예:
+        /// - 1200k → 2400k
+        /// - 500k → 1000k
+        /// </summary>
+        /// <param name="bitrate">FFmpeg 비트레이트 문자열.</param>
+        /// <returns>FFmpeg bufsize 문자열.</returns>
+        private string BuildBufferSize(string bitrate)
+        {
+            int kbps = ParseBitrateKbps(bitrate);
+
+            if (kbps <= 0)
+                return "2400k";
+
+            return (kbps * 2) + "k";
+        }
+
+        /// <summary>
+        /// 비트레이트 문자열을 kbps 숫자로 변환한다.
+        /// 
+        /// 예:
+        /// - 1200k → 1200
+        /// - 2m → 2000
+        /// </summary>
+        /// <param name="bitrate">비트레이트 문자열.</param>
+        /// <returns>kbps 값.</returns>
+        private int ParseBitrateKbps(string bitrate)
+        {
+            if (string.IsNullOrWhiteSpace(bitrate))
+                return 0;
+
+            string value = bitrate.Trim().ToLower();
+
+            try
+            {
+                if (value.EndsWith("k"))
+                {
+                    value = value.Substring(0, value.Length - 1);
+
+                    int kbps;
+
+                    if (int.TryParse(value, out kbps))
+                        return kbps;
+                }
+
+                if (value.EndsWith("m"))
+                {
+                    value = value.Substring(0, value.Length - 1);
+
+                    int mbps;
+
+                    if (int.TryParse(value, out mbps))
+                        return mbps * 1000;
+                }
+
+                int raw;
+
+                if (int.TryParse(value, out raw))
+                    return raw;
+            }
+            catch
+            {
+            }
+
+            return 0;
         }
 
         /// <summary>
@@ -396,6 +498,180 @@ namespace pccam_32.Services
         {
             if (rtspServerConfig.RtspPort <= 0 || rtspServerConfig.RtspPort > 65535)
                 throw new InvalidOperationException("RTSP 포트 값이 올바르지 않습니다.");
+        }
+
+        /// <summary>
+        /// Main/Sub 동시 출력용 filter_complex 값을 생성한다.
+        /// 
+        /// 기존 구조에서는 MainStream이 null 필터로 그대로 통과되어
+        /// 실제 FPS가 설정값보다 높게 나올 수 있었다.
+        /// 
+        /// 수정 후에는 Main/Sub 모두 fps 필터를 통과시켜
+        /// 실제 RTSP 스트림 FPS를 설정값에 가깝게 제한한다.
+        /// </summary>
+        /// <param name="mainStream">MainStream 품질 설정.</param>
+        /// <param name="subStream">SubStream 품질 설정.</param>
+        /// <param name="monitorInfo">현재 캡처 대상 모니터 정보.</param>
+        /// <returns>FFmpeg filter_complex 문자열.</returns>
+        private string BuildMainSubFilterComplex(
+            StreamQualityConfig mainStream,
+            StreamQualityConfig subStream,
+            MonitorInfo monitorInfo)
+        {
+            string mainFilter = BuildVideoFilter(
+                mainStream,
+                monitorInfo);
+
+            string subFilter = BuildVideoFilter(
+                subStream,
+                monitorInfo);
+
+            return "[0:v]split=2[mainraw][subraw];" +
+                   "[mainraw]" + mainFilter + "[mainout];" +
+                   "[subraw]" + subFilter + "[subout]";
+        }
+
+        /// <summary>
+        /// 단일 출력일 때 사용할 -vf 옵션 문자열을 생성한다.
+        /// 
+        /// Main만 사용하거나 Sub만 사용하는 경우에도
+        /// fps 필터를 적용하여 실제 송출 FPS가 설정값을 초과하지 않도록 한다.
+        /// </summary>
+        /// <param name="quality">송출 품질 설정.</param>
+        /// <param name="monitorInfo">현재 캡처 대상 모니터 정보.</param>
+        /// <returns>FFmpeg -vf 옵션 문자열.</returns>
+        private string BuildVideoFilterOption(
+            StreamQualityConfig quality,
+            MonitorInfo monitorInfo)
+        {
+            string filter = BuildVideoFilter(
+                quality,
+                monitorInfo);
+
+            return "-vf \"" + filter + "\" ";
+        }
+
+        /// <summary>
+        /// 영상 필터 문자열을 생성한다.
+        /// 
+        /// fps 필터로 프레임 수만 제한한다.
+        /// settb/setpts는 H.264/RTP 시간정보를 NVR이 다르게 해석할 수 있으므로 사용하지 않는다.
+        /// </summary>
+        /// <param name="quality">송출 품질 설정.</param>
+        /// <param name="monitorInfo">현재 캡처 대상 모니터 정보.</param>
+        /// <returns>FFmpeg 비디오 필터 문자열.</returns>
+        private string BuildVideoFilter(
+            StreamQualityConfig quality,
+            MonitorInfo monitorInfo)
+        {
+            int fps = GetSafeFps(quality);
+
+            string filter = "fps=fps=" + fps + ":round=down";
+
+            if (quality != null &&
+                quality.Width > 0 &&
+                quality.Height > 0 &&
+                (quality.Width != monitorInfo.BoundsWidth ||
+                 quality.Height != monitorInfo.BoundsHeight))
+            {
+                filter += ",scale=" + quality.Width + ":" + quality.Height;
+            }
+
+            return filter;
+        }
+
+        /// <summary>
+        /// 품질 설정에서 안전한 FPS 값을 가져온다.
+        /// 값이 없거나 잘못된 경우 5fps를 기본값으로 사용한다.
+        /// </summary>
+        /// <param name="quality">송출 품질 설정.</param>
+        /// <returns>1 이상 FPS 값.</returns>
+        private int GetSafeFps(StreamQualityConfig quality)
+        {
+            if (quality == null)
+                return 5;
+
+            if (quality.Fps <= 0)
+                return 5;
+
+            return quality.Fps;
+        }
+
+        /// <summary>
+        /// StreamConfig 내부의 MainStream/SubStream 설정 객체를 보장한다.
+        /// 
+        /// 기존 코드처럼 지역 변수에만 기본 객체를 생성하면,
+        /// FFmpeg Arguments 생성에는 사용되지만 ONVIF 응답 생성 쪽의 AppConfig에는 반영되지 않는다.
+        /// 그래서 실제 런타임 설정 객체인 streamConfig.MainStream / streamConfig.SubStream에 직접 대입한다.
+        /// </summary>
+        /// <param name="streamConfig">스트림 설정.</param>
+        private void EnsureStreamQualityConfigs(StreamConfig streamConfig)
+        {
+            if (streamConfig == null)
+                throw new ArgumentNullException("streamConfig");
+
+            if (streamConfig.MainStream == null)
+            {
+                streamConfig.MainStream =
+                    StreamQualityConfig.CreateMain(streamConfig.RtspPath);
+            }
+
+            if (streamConfig.SubStream == null)
+            {
+                streamConfig.SubStream =
+                    StreamQualityConfig.CreateSub(streamConfig.RtspPath + "_sub");
+            }
+        }
+
+        /// <summary>
+        /// 실제 캡처 대상 모니터 해상도를 MainStream 설정에 반영한다.
+        /// 
+        /// MainStream.Width/Height가 0이면 원본 모니터 해상도를 사용한다는 의미로 처리한다.
+        /// 이 값을 실제 MonitorInfo.BoundsWidth / BoundsHeight로 보정해야
+        /// ONVIF GetProfiles / GetVideoEncoderConfigurationOptions 응답과 실제 RTSP 스트림 해상도가 일치한다.
+        /// 
+        /// SubStream은 보통 640x360처럼 명시된 해상도로 축소 송출하므로,
+        /// 값이 이미 있으면 그대로 둔다.
+        /// </summary>
+        /// <param name="streamConfig">스트림 설정.</param>
+        /// <param name="monitorInfo">실제 캡처 대상 모니터 정보.</param>
+        private void ApplyActualMonitorResolution(
+            StreamConfig streamConfig,
+            MonitorInfo monitorInfo)
+        {
+            if (streamConfig == null)
+                throw new ArgumentNullException("streamConfig");
+
+            if (monitorInfo == null)
+                throw new ArgumentNullException("monitorInfo");
+
+            if (streamConfig.MainStream == null)
+                streamConfig.MainStream = StreamQualityConfig.CreateMain(streamConfig.RtspPath);
+
+            if (streamConfig.SubStream == null)
+                streamConfig.SubStream = StreamQualityConfig.CreateSub(streamConfig.RtspPath + "_sub");
+
+            /*
+             * MainStream은 기본적으로 실제 화면 원본 해상도와 같아야 한다.
+             * Width/Height가 0이면 FFmpeg에서는 scale을 하지 않고 원본으로 나가게 되므로,
+             * ONVIF 응답도 실제 원본 해상도를 알려줘야 한다.
+             */
+            if (streamConfig.MainStream.Width <= 0)
+                streamConfig.MainStream.Width = monitorInfo.BoundsWidth;
+
+            if (streamConfig.MainStream.Height <= 0)
+                streamConfig.MainStream.Height = monitorInfo.BoundsHeight;
+
+            /*
+             * SubStream은 축소 해상도가 설정되어 있으면 그대로 사용한다.
+             * 단, 값이 비어 있는 경우에는 실제 화면 해상도를 기준으로 한다.
+             * 기본 CreateSub가 640x360을 넣는 구조라면 보통 이 부분은 실행되지 않는다.
+             */
+            if (streamConfig.SubStream.Width <= 0)
+                streamConfig.SubStream.Width = monitorInfo.BoundsWidth;
+
+            if (streamConfig.SubStream.Height <= 0)
+                streamConfig.SubStream.Height = monitorInfo.BoundsHeight;
         }
     }
 }
