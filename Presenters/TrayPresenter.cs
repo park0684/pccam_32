@@ -320,6 +320,7 @@ namespace pccam_32.Presenters
         /// </summary>
         private void ApplyOperationPolicy()
         {
+
             if (_config == null || _config.Operation == null)
                 return;
 
@@ -382,7 +383,12 @@ namespace pccam_32.Presenters
         {
             try
             {
-                _firewallService.Apply(_config);
+                if (_config == null || _config.Operation == null)
+                    return;
+
+                string pccExePath = _pathProvider.AppExePath;
+                string mideaMtxExePath = _pathProvider.GetExternalFilePath(_config.RtspServer.ServerExeName);
+                _firewallService.ApplyProgramRules(pccExePath, mideaMtxExePath);                
 
                 _logService.WriteApp("방화벽 정책 적용 완료");
             }

@@ -284,15 +284,20 @@ namespace pccam_32.Services
             StreamQualityConfig quality)
         {
             string codec = streamConfig.Codec ?? "H264";
+            int gop = Math.Max(1, quality.Fps);
+
 
             if (string.Equals(codec, "H265", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(codec, "H.265", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(codec, "HEVC", StringComparison.OrdinalIgnoreCase))
+                string.Equals(codec, "HEVC", StringComparison.OrdinalIgnoreCase))    
             {
                 return
                     "-vcodec libx265 " +
                     "-preset ultrafast " +
                     "-pix_fmt yuv420p " +
+                    "-g " + gop + " " +
+                    "-keyint_min " + gop + " " +
+                    "-sc_threshold 0 " +
                     "-b:v " + quality.Bitrate;
             }
 
@@ -308,6 +313,7 @@ namespace pccam_32.Services
              * -pix_fmt yuv420p
              *   VLC/NVR 호환성을 높인다.
              */
+
             return
                 "-vcodec libx264 " +
                 "-profile:v baseline " +
@@ -315,6 +321,9 @@ namespace pccam_32.Services
                 "-preset ultrafast " +
                 "-tune zerolatency " +
                 "-pix_fmt yuv420p " +
+                "-g " + gop + " " +
+                "-keyint_min " + gop + " " +
+                "-sc_threshold 0 " +
                 "-b:v " + quality.Bitrate;
         }
 

@@ -89,5 +89,21 @@ namespace pccam_32.Infrastructure
             if (!Directory.Exists(ExternalDirectory))
                 Directory.CreateDirectory(ExternalDirectory);
         }
+
+        /// <summary>
+        /// 현재 실행 중인 PCCAM 실행 파일 경로를 반환한다.
+        /// </summary>
+        public string AppExePath
+        {
+            get { return System.Reflection.Assembly.GetEntryAssembly().Location; }
+        }
+
+        /// <summary>
+        /// MediaMTX 실행 파일 경로를 반환한다.
+        /// </summary>
+        public string GetExternalFilePath(string fileName)
+        {
+            return Path.Combine(BaseDirectory, "External", fileName);
+        }
     }
 }

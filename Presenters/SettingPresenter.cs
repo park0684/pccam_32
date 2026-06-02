@@ -245,7 +245,8 @@ namespace pccam_32.Presenters
 
                 ApplyAutoStartPolicy(_config);
 
-                ApplyFirewallPolicy(_config);
+                //2026-06-02 저장시 매번 실행하던 방화벽 등록 보류
+                //ApplyFirewallPolicy(_config);
 
                 RefreshAuthButtonText();
 

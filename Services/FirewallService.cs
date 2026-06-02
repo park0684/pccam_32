@@ -265,5 +265,58 @@ namespace pccam_32.Services
                 ", Port=" +
                 port);
         }
+
+        /// <summary>
+        /// PC CAM 실행에 필요한 프로그램 기준 방화벽 규칙을 적용한다.
+        /// 2026-06-02
+        /// 포트 번호가 아니라 실행 파일 경로 기준으로 인바운드 허용 규칙을 등록한다.
+        /// 설정 저장 때마다 포트별 규칙을 삭제/재등록하지 않기 위한 방식이다.
+        /// </summary>
+        public void ApplyProgramRules(
+            string pccamExePath,
+            string mediamtxExePath)
+        {
+            if (!IsAdministrator())
+            {
+                _logService.WriteApp(
+                    "방화벽 프로그램 규칙 등록 생략: 관리자 권한이 아닙니다.");
+                return;
+            }
+
+            AddProgramInboundRule("PC CAM App", pccamExePath);
+            AddProgramInboundRule("PC CAM MediaMTX", mediamtxExePath);
+        }
+
+        /// <summary>
+        /// 지정한 프로그램 경로에 대한 인바운드 허용 규칙을 등록한다.
+        /// </summary>
+        private void AddProgramInboundRule(
+            string ruleName,
+            string programPath)
+        {
+            if (string.IsNullOrWhiteSpace(ruleName))
+                throw new ArgumentException("방화벽 규칙명이 비어 있습니다.", "ruleName");
+
+            if (string.IsNullOrWhiteSpace(programPath))
+                throw new ArgumentException("프로그램 경로가 비어 있습니다.", "programPath");
+
+            DeleteRule(ruleName);
+
+            string arguments =
+                "advfirewall firewall add rule " +
+                "name=\"" + ruleName + "\" " +
+                "dir=in " +
+                "action=allow " +
+                "program=\"" + programPath + "\" " +
+                "enable=yes";
+
+            ExecuteNetsh(arguments);
+
+            _logService.WriteApp(
+                "방화벽 프로그램 규칙 등록 완료. Rule=" +
+                ruleName +
+                ", Program=" +
+                programPath);
+        }
     }
 }
