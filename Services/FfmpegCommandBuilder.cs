@@ -17,14 +17,21 @@ namespace pccam_32.Services
     /// </summary>
     public class FfmpegCommandBuilder
     {
+        private const int DefaultRtmpPort = 1935;
+
         /// <summary>
         /// FFmpeg 실행 Arguments를 생성한다.
         /// 
         /// 실제 실행 파일 경로(ffmpeg.exe)는 여기서 만들지 않고,
         /// ProcessStartInfo.FileName에서 별도로 지정한다.
         /// 
-        /// Main/Sub가 모두 활성화되어 있으면 하나의 FFmpeg 프로세스에서
-        /// RTSP 출력 2개를 생성한다.
+        /// 변경된 구조:
+        /// - FFmpeg는 MediaMTX로 RTMP/FLV publish 한다.
+        /// - NVR/VLC는 기존처럼 MediaMTX의 RTSP 주소를 읽는다.
+        /// 
+        /// 예:
+        /// FFmpeg publish: rtmp://127.0.0.1:1935/poscam
+        /// NVR read:       rtsp://PC_IP:554/poscam
         /// </summary>
         public string BuildArguments(
             StreamConfig streamConfig,
@@ -42,21 +49,15 @@ namespace pccam_32.Services
 
             ValidateMonitorInfo(monitorInfo);
             ValidateRtspServerConfig(rtspServerConfig);
+
             /*
-             * Main/Sub 설정 객체를 먼저 streamConfig에 확정한다.
-             * 
-             * 기존처럼 지역 변수에만 CreateMain/CreateSub를 넣으면
-             * ONVIF 응답 생성 쪽에서는 해당 값이 반영되지 않을 수 있다.
+             * Main/Sub 설정 객체를 streamConfig에 확정한다.
+             * ONVIF 응답과 FFmpeg 실행 인자가 같은 설정 객체를 보도록 하기 위함이다.
              */
             EnsureStreamQualityConfigs(streamConfig);
 
             /*
-             * 실제 캡처 대상 모니터 해상도를 MainStream 해상도에 반영한다.
-             * 
-             * MainStream.Width/Height가 0이면 "원본 해상도 유지" 의미이므로,
-             * 실제 MonitorInfo.BoundsWidth / BoundsHeight 값을 넣어준다.
-             * 
-             * 이렇게 해야 FFmpeg 실제 송출 해상도와 ONVIF 설정 응답 해상도가 일치한다.
+             * MainStream 해상도가 0이면 실제 캡처 대상 모니터 해상도를 반영한다.
              */
             ApplyActualMonitorResolution(
                 streamConfig,
@@ -86,11 +87,13 @@ namespace pccam_32.Services
 
             /*
              * 캡처 FPS는 활성화된 출력 중 가장 높은 FPS를 사용한다.
-             * 예:
-             * Main 10fps, Sub 5fps → 화면 캡처 10fps
-             * Sub는 filter_complex에서 fps 필터로 5fps까지 낮춘다.
+             * Main 10fps, Sub 5fps라면 캡처는 10fps로 한다.
              */
-            int captureFps = GetCaptureFps(mainStream, subStream, useMain, useSub);
+            int captureFps = GetCaptureFps(
+                mainStream,
+                subStream,
+                useMain,
+                useSub);
 
             string inputOptions =
                 "-f gdigrab " +
@@ -103,26 +106,20 @@ namespace pccam_32.Services
 
             /*
              * Main/Sub 둘 다 사용하는 경우.
-             * 
-             * 입력 화면을 split 한 뒤,
-             * Main/Sub 모두 fps 필터를 적용한다.
-             * 이렇게 해야 실제 스트리밍 FPS가 설정 FPS를 초과하지 않는다.
+             * Main은 입력 FPS 그대로 통과시키고,
+             * Sub만 fps/scale 필터를 적용한다.
              */
             if (useMain && useSub)
             {
-                /*
-                 * Main/Sub는 서로 다른 RTSP 경로를 사용해야 한다.
-                 * 같은 경로로 두 번 publish하면 MediaMTX가 두 번째 publish를 거부할 수 있다.
-                 */
-                ValidateDifferentRtspPaths(mainStream, subStream);
+                ValidateDifferentRtspPaths(
+                    mainStream,
+                    subStream);
 
-                string mainUrl = BuildLocalRtspPublishUrl(
-                    mainStream.RtspPath,
-                    rtspServerConfig);
+                string mainUrl = BuildLocalRtmpPublishUrl(
+                    mainStream.RtspPath);
 
-                string subUrl = BuildLocalRtspPublishUrl(
-                    subStream.RtspPath,
-                    rtspServerConfig);
+                string subUrl = BuildLocalRtmpPublishUrl(
+                    subStream.RtspPath);
 
                 string filterComplex = BuildMainSubFilterComplex(
                     mainStream,
@@ -135,16 +132,12 @@ namespace pccam_32.Services
 
                     "-map \"[mainout]\" " +
                     BuildCodecOptions(streamConfig, mainStream) + " " +
-                    "-an " +
-                    "-f rtsp " +
-                    "-rtsp_transport tcp " +
+                    BuildRtmpOutputOptions() +
                     mainUrl + " " +
 
                     "-map \"[subout]\" " +
                     BuildCodecOptions(streamConfig, subStream) + " " +
-                    "-an " +
-                    "-f rtsp " +
-                    "-rtsp_transport tcp " +
+                    BuildRtmpOutputOptions() +
                     subUrl;
 
                 return arguments;
@@ -152,24 +145,18 @@ namespace pccam_32.Services
 
             /*
              * Main만 사용하는 경우.
+             * Main은 입력 gdigrab -framerate 값을 그대로 사용하므로
+             * 별도 -vf fps 필터를 적용하지 않는다.
              */
             if (useMain)
             {
-                string mainUrl = BuildLocalRtspPublishUrl(
-                    mainStream.RtspPath,
-                    rtspServerConfig);
-
-                string videoFilter = BuildVideoFilterOption(
-                    mainStream,
-                    monitorInfo);
+                string mainUrl = BuildLocalRtmpPublishUrl(
+                    mainStream.RtspPath);
 
                 string arguments =
                     inputOptions +
-                    videoFilter +
                     BuildCodecOptions(streamConfig, mainStream) + " " +
-                    "-an " +
-                    "-f rtsp " +
-                    "-rtsp_transport tcp " +
+                    BuildRtmpOutputOptions() +
                     mainUrl;
 
                 return arguments;
@@ -177,15 +164,12 @@ namespace pccam_32.Services
 
             /*
              * Sub만 사용하는 경우.
-             * 
-             * 위에서 useMain && useSub, useMain 조건은 이미 처리되었으므로
-             * 여기까지 내려왔다면 useSub만 true인 상태다.
+             * Sub는 저해상도/저프레임 변환이 필요하므로 -vf를 적용한다.
              */
             if (useSub)
             {
-                string subUrl = BuildLocalRtspPublishUrl(
-                    subStream.RtspPath,
-                    rtspServerConfig);
+                string subUrl = BuildLocalRtmpPublishUrl(
+                    subStream.RtspPath);
 
                 string videoFilter = BuildVideoFilterOption(
                     subStream,
@@ -195,21 +179,14 @@ namespace pccam_32.Services
                     inputOptions +
                     videoFilter +
                     BuildCodecOptions(streamConfig, subStream) + " " +
-                    "-an " +
-                    "-f rtsp " +
-                    "-rtsp_transport tcp " +
+                    BuildRtmpOutputOptions() +
                     subUrl;
 
                 return arguments;
             }
 
-            /*
-             * 이론상 여기까지 올 수 없지만,
-             * 컴파일러와 예외 흐름 명확성을 위해 마지막 방어 코드를 둔다.
-             */
             throw new InvalidOperationException("FFmpeg Arguments를 생성할 수 없습니다.");
         }
-
 
         /// <summary>
         /// MainStream과 SubStream의 RTSP 경로가 서로 다른지 확인한다.
@@ -256,13 +233,12 @@ namespace pccam_32.Services
         /// <summary>
         /// 코덱별 FFmpeg 옵션을 생성한다.
         /// 
-        /// NVR 호환성을 위해 H.264 시간정보를 직접 조작하지 않고,
-        /// 일반적인 CFR 출력과 x264 파라미터로 고정 프레임레이트 스트림을 생성한다.
+        /// 파이썬 버전과 유사하게 단순 구성한다.
+        /// 시간정보를 강제로 재작성하지 않고, 입력 프레임 흐름과 기본 인코더 흐름을 따른다.
         /// 
-        /// 정상 동작 채널과 유사하게 GOP는 FPS의 3배로 설정한다.
-        /// 예:
-        /// - 10fps → GOP 30
-        /// - 3fps  → GOP 9
+        /// 주의:
+        /// 과거 오류였던 "-b:v -g 10" 형태가 되지 않도록
+        /// -b:v 뒤에는 반드시 bitrate 값을 배치한다.
         /// </summary>
         /// <param name="streamConfig">상위 스트림 설정.</param>
         /// <param name="quality">Main/Sub 품질 설정.</param>
@@ -276,54 +252,41 @@ namespace pccam_32.Services
             int fps = GetSafeFps(quality);
 
             /*
-             * 정상 채널의 패턴이 10fps/GOP30, 3fps/GOP9이므로
-             * 우선 GOP를 FPS의 3배로 맞춘다.
+             * 파이썬 버전 기준에 맞춰 GOP는 FPS의 2배로 설정한다.
+             * 예:
+             * 10fps → GOP 20
+             * 5fps  → GOP 10
              */
-            int gop = Math.Max(1, fps * 3);
+            int gop = Math.Max(1, fps * 2);
 
             string bitrate = NormalizeBitrate(
                 quality == null ? "" : quality.Bitrate,
                 "1200k");
 
-            string bufferSize = BuildBufferSize(bitrate);
-
             if (string.Equals(codec, "H265", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(codec, "H.265", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(codec, "HEVC", StringComparison.OrdinalIgnoreCase))
             {
-                return "-r " + fps + " " +
-                       "-fps_mode cfr " +
-                       "-vcodec libx265 " +
+                return "-vcodec libx265 " +
                        "-preset ultrafast " +
                        "-pix_fmt yuv420p " +
+                       "-b:v " + bitrate + " " +
                        "-g " + gop + " " +
                        "-keyint_min " + gop + " " +
-                       "-sc_threshold 0 " +
-                       "-b:v " + bitrate + " " +
-                       "-maxrate " + bitrate + " " +
-                       "-bufsize " + bufferSize;
+                       "-sc_threshold 0";
             }
 
-            return "-r " + fps + " " +
-                   "-fps_mode cfr " +
-                   "-vcodec libx264 " +
+            return "-vcodec libx264 " +
                    "-profile:v baseline " +
-                   "-level 3.1 " +
+                   "-level 3.0 " +
                    "-preset ultrafast " +
                    "-tune zerolatency " +
                    "-pix_fmt yuv420p " +
-                   "-x264-params \"keyint=" + gop +
-                        ":min-keyint=" + gop +
-                        ":scenecut=0" +
-                        ":repeat-headers=1" +
-                        ":force-cfr=1\" " +
-                   "-g " + gop + " " +
-                   "-keyint_min " + gop + " " +
-                   "-sc_threshold 0 " +
                    "-bf 0 " +
                    "-b:v " + bitrate + " " +
-                   "-maxrate " + bitrate + " " +
-                   "-bufsize " + bufferSize;
+                   "-g " + gop + " " +
+                   "-keyint_min " + gop + " " +
+                   "-sc_threshold 0";
         }
 
 
@@ -429,20 +392,6 @@ namespace pccam_32.Services
             return 0;
         }
 
-        /// <summary>
-        /// FFmpeg가 MediaMTX로 publish할 로컬 RTSP URL을 생성한다.
-        /// 
-        /// FFmpeg와 MediaMTX는 같은 PC에서 실행되므로,
-        /// publish 주소는 127.0.0.1을 사용한다.
-        /// </summary>
-        private string BuildLocalRtspPublishUrl(
-            string rtspPath,
-            RtspServerConfig rtspServerConfig)
-        {
-            string path = NormalizeRtspPath(rtspPath);
-
-            return "rtsp://127.0.0.1:" + rtspServerConfig.RtspPort + "/" + path;
-        }
 
         /// <summary>
         /// RTSP 경로에서 앞쪽 / 를 제거한다.
@@ -503,11 +452,8 @@ namespace pccam_32.Services
         /// <summary>
         /// Main/Sub 동시 출력용 filter_complex 값을 생성한다.
         /// 
-        /// 기존 구조에서는 MainStream이 null 필터로 그대로 통과되어
-        /// 실제 FPS가 설정값보다 높게 나올 수 있었다.
-        /// 
-        /// 수정 후에는 Main/Sub 모두 fps 필터를 통과시켜
-        /// 실제 RTSP 스트림 FPS를 설정값에 가깝게 제한한다.
+        /// 파이썬 버전과 유사하게 MainStream은 입력 FPS를 그대로 사용한다.
+        /// SubStream만 미리보기용 저해상도/저프레임으로 변환한다.
         /// </summary>
         /// <param name="mainStream">MainStream 품질 설정.</param>
         /// <param name="subStream">SubStream 품질 설정.</param>
@@ -518,16 +464,12 @@ namespace pccam_32.Services
             StreamQualityConfig subStream,
             MonitorInfo monitorInfo)
         {
-            string mainFilter = BuildVideoFilter(
-                mainStream,
-                monitorInfo);
-
-            string subFilter = BuildVideoFilter(
+            string subFilter = BuildSubVideoFilter(
                 subStream,
                 monitorInfo);
 
             return "[0:v]split=2[mainraw][subraw];" +
-                   "[mainraw]" + mainFilter + "[mainout];" +
+                   "[mainraw]null[mainout];" +
                    "[subraw]" + subFilter + "[subout]";
         }
 
@@ -552,10 +494,10 @@ namespace pccam_32.Services
         }
 
         /// <summary>
-        /// 영상 필터 문자열을 생성한다.
+        /// 단일 출력용 영상 필터 문자열을 생성한다.
         /// 
-        /// fps 필터로 프레임 수만 제한한다.
-        /// settb/setpts는 H.264/RTP 시간정보를 NVR이 다르게 해석할 수 있으므로 사용하지 않는다.
+        /// setpts, settb 같은 시간정보 강제 조정은 사용하지 않는다.
+        /// 필요 시 fps/scale만 적용한다.
         /// </summary>
         /// <param name="quality">송출 품질 설정.</param>
         /// <param name="monitorInfo">현재 캡처 대상 모니터 정보.</param>
@@ -566,13 +508,11 @@ namespace pccam_32.Services
         {
             int fps = GetSafeFps(quality);
 
-            string filter = "fps=fps=" + fps + ":round=down";
+            string filter = "fps=" + fps;
 
             if (quality != null &&
                 quality.Width > 0 &&
-                quality.Height > 0 &&
-                (quality.Width != monitorInfo.BoundsWidth ||
-                 quality.Height != monitorInfo.BoundsHeight))
+                quality.Height > 0)
             {
                 filter += ",scale=" + quality.Width + ":" + quality.Height;
             }
@@ -672,6 +612,66 @@ namespace pccam_32.Services
 
             if (streamConfig.SubStream.Height <= 0)
                 streamConfig.SubStream.Height = monitorInfo.BoundsHeight;
+        }
+
+        /// <summary>
+        /// FFmpeg가 MediaMTX로 publish할 로컬 RTMP URL을 생성한다.
+        /// 
+        /// FFmpeg는 RTMP/FLV로 MediaMTX에 입력하고,
+        /// NVR/VLC는 MediaMTX가 제공하는 RTSP 주소를 읽는다.
+        /// 
+        /// 예:
+        /// FFmpeg publish: rtmp://127.0.0.1:1935/poscam
+        /// NVR read:       rtsp://PC_IP:554/poscam
+        /// </summary>
+        /// <param name="rtspPath">스트림 경로.</param>
+        /// <returns>로컬 RTMP publish URL.</returns>
+        private string BuildLocalRtmpPublishUrl(string rtspPath)
+        {
+            string path = NormalizeRtspPath(rtspPath);
+
+            return "rtmp://127.0.0.1:" + DefaultRtmpPort + "/" + path;
+        }
+
+        /// <summary>
+        /// FFmpeg RTMP/FLV 출력 옵션을 생성한다.
+        /// 
+        /// RTSP publish 대신 FLV 컨테이너로 RTMP publish한다.
+        /// MediaMTX는 RTMP 입력을 받아 동일 path의 RTSP read를 제공한다.
+        /// </summary>
+        /// <returns>FFmpeg RTMP 출력 옵션 문자열.</returns>
+        private string BuildRtmpOutputOptions()
+        {
+            return "-an " +
+                   "-f flv " +
+                   "-flvflags no_duration_filesize ";
+        }
+
+        /// <summary>
+        /// SubStream용 영상 필터 문자열을 생성한다.
+        /// 
+        /// SubStream은 MainStream보다 낮은 FPS/해상도로 송출하기 위해
+        /// fps와 scale 필터를 적용한다.
+        /// </summary>
+        /// <param name="quality">SubStream 품질 설정.</param>
+        /// <param name="monitorInfo">현재 캡처 대상 모니터 정보.</param>
+        /// <returns>SubStream 필터 문자열.</returns>
+        private string BuildSubVideoFilter(
+            StreamQualityConfig quality,
+            MonitorInfo monitorInfo)
+        {
+            int fps = GetSafeFps(quality);
+
+            string filter = "fps=" + fps;
+
+            if (quality != null &&
+                quality.Width > 0 &&
+                quality.Height > 0)
+            {
+                filter += ",scale=" + quality.Width + ":" + quality.Height;
+            }
+
+            return filter;
         }
     }
 }
