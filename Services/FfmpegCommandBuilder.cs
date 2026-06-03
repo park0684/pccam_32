@@ -17,8 +17,6 @@ namespace pccam_32.Services
     /// </summary>
     public class FfmpegCommandBuilder
     {
-        private const int DefaultRtmpPort = 1935;
-
         /// <summary>
         /// FFmpeg 실행 Arguments를 생성한다.
         /// 
@@ -116,10 +114,12 @@ namespace pccam_32.Services
                     subStream);
 
                 string mainUrl = BuildLocalRtmpPublishUrl(
-                    mainStream.RtspPath);
+                     mainStream.RtspPath,
+                     rtspServerConfig);
 
                 string subUrl = BuildLocalRtmpPublishUrl(
-                    subStream.RtspPath);
+                    subStream.RtspPath,
+                    rtspServerConfig);
 
                 string filterComplex = BuildMainSubFilterComplex(
                     mainStream,
@@ -151,7 +151,8 @@ namespace pccam_32.Services
             if (useMain)
             {
                 string mainUrl = BuildLocalRtmpPublishUrl(
-                    mainStream.RtspPath);
+                    mainStream.RtspPath,
+                    rtspServerConfig);
 
                 string arguments =
                     inputOptions +
@@ -169,7 +170,8 @@ namespace pccam_32.Services
             if (useSub)
             {
                 string subUrl = BuildLocalRtmpPublishUrl(
-                    subStream.RtspPath);
+                    subStream.RtspPath,
+                    rtspServerConfig);
 
                 string videoFilter = BuildVideoFilterOption(
                     subStream,
@@ -276,17 +278,30 @@ namespace pccam_32.Services
                        "-sc_threshold 0";
             }
 
+            //return "-vcodec libx264 " +
+            //       "-profile:v baseline " +
+            //       "-preset ultrafast " +
+            //       "-tune zerolatency " +
+            //       "-pix_fmt yuv420p " +
+            //       "-bf 0 " +
+            //       "-b:v " + bitrate + " " +
+            //       "-g " + gop + " " +
+            //       "-keyint_min " + gop + " " +
+            //       "-sc_threshold 0";
+
             return "-vcodec libx264 " +
                    "-profile:v baseline " +
-                   "-level 3.0 " +
                    "-preset ultrafast " +
-                   "-tune zerolatency " +
+                   "-threads 1 " +
                    "-pix_fmt yuv420p " +
                    "-bf 0 " +
                    "-b:v " + bitrate + " " +
                    "-g " + gop + " " +
                    "-keyint_min " + gop + " " +
-                   "-sc_threshold 0";
+                   "-sc_threshold 0 " +
+                   "-x264-params \"sliced-threads=0:slices=1:keyint=" + gop +
+                        ":min-keyint=" + gop +
+                        ":scenecut=0:repeat-headers=1\"";
         }
 
 
@@ -447,6 +462,9 @@ namespace pccam_32.Services
         {
             if (rtspServerConfig.RtspPort <= 0 || rtspServerConfig.RtspPort > 65535)
                 throw new InvalidOperationException("RTSP 포트 값이 올바르지 않습니다.");
+
+            if (rtspServerConfig.RtmpPort <= 0 || rtspServerConfig.RtmpPort > 65535)
+                throw new InvalidOperationException("RTMP 포트 값이 올바르지 않습니다.");
         }
 
         /// <summary>
@@ -617,20 +635,24 @@ namespace pccam_32.Services
         /// <summary>
         /// FFmpeg가 MediaMTX로 publish할 로컬 RTMP URL을 생성한다.
         /// 
-        /// FFmpeg는 RTMP/FLV로 MediaMTX에 입력하고,
+        /// FFmpeg는 RTMP/FLV로 MediaMTX에 영상을 입력하고,
         /// NVR/VLC는 MediaMTX가 제공하는 RTSP 주소를 읽는다.
         /// 
-        /// 예:
-        /// FFmpeg publish: rtmp://127.0.0.1:1935/poscam
-        /// NVR read:       rtsp://PC_IP:554/poscam
+        /// MediaMTX의 RTMP 포트는 RtspServerConfig.RtmpPort 값을 사용한다.
         /// </summary>
         /// <param name="rtspPath">스트림 경로.</param>
+        /// <param name="rtspServerConfig">RTSP/RTMP 서버 설정.</param>
         /// <returns>로컬 RTMP publish URL.</returns>
-        private string BuildLocalRtmpPublishUrl(string rtspPath)
+        private string BuildLocalRtmpPublishUrl(
+            string rtspPath,
+            RtspServerConfig rtspServerConfig)
         {
+            if (rtspServerConfig == null)
+                throw new ArgumentNullException("rtspServerConfig");
+
             string path = NormalizeRtspPath(rtspPath);
 
-            return "rtmp://127.0.0.1:" + DefaultRtmpPort + "/" + path;
+            return "rtmp://127.0.0.1:" + rtspServerConfig.RtmpPort + "/" + path;
         }
 
         /// <summary>
