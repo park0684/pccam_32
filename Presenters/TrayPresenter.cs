@@ -133,9 +133,22 @@ namespace pccam_32.Presenters
                     _config.Auth != null &&
                     _authDllAdapter.HasLocalAuth(_config.Auth);
 
-                if (hasLocalAuth &&
+                bool autoStartStreaming =
+                    hasLocalAuth &&
                     _config.Operation != null &&
-                    _config.Operation.AutoStartStreaming)
+                    _config.Operation.AutoStartStreaming;
+
+                /*
+                 * 자동 송출이 꺼져 있어도 프로그램 시작 시 인증 감시는 시작한다.
+                 * 자동 송출이 켜져 있으면 StartStreamingInternal() → StreamSupervisorService.Start()
+                 * 흐름에서 인증 확인과 감시 시작이 수행되므로 여기서 중복 호출하지 않는다.
+                 */
+                if (hasLocalAuth && !autoStartStreaming)
+                {
+                    _supervisor.StartAuthMonitoring(_config);
+                }
+
+                if (autoStartStreaming)
                 {
                     _logService.WriteStream("자동 송출 설정 감지. 내부 송출 시작");
                     StartStreamingInternal();
@@ -249,7 +262,13 @@ namespace pccam_32.Presenters
             }
 
             _logService.WriteApp("종료 요청 허용");
-
+            try
+            {
+                _supervisor.StopAuthMonitoring();
+            }
+            catch
+            { 
+            }
             try
             {
                 _supervisor.Stop();

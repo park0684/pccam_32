@@ -188,7 +188,12 @@ namespace pccam_32.Services
                  * CheckCanRun은 AuthDllAdapter를 통해 PccAuthClient.dll의 CheckStartup을 호출한다.
                  * 인증 성공 시 PccAuthClient.dll이 계산한 다음 인증 확인 시각인 NextCheckAt을 반환한다.
                  */
-                AuthResult authResult = _authDllAdapter.CheckCanRun(config.Auth);
+                AuthResult authResult = StartAuthMonitoring(config);
+
+                if (authResult == null || !authResult.IsSuccess)
+                {
+                    return;
+                }
 
                 RaiseLog(
                     "시작 인증 결과. Success=" +
@@ -488,11 +493,6 @@ namespace pccam_32.Services
             try
             {
                 RaiseLog("송출 중지 요청");
-
-                /*
-                 * 송출 중지 시 실행 중 인증 감시도 함께 중지한다.
-                 */
-                _runtimeAuthMonitorService.Stop();
 
                 /*
                  * FFmpeg가 MediaMTX로 publish 중이므로,
@@ -905,5 +905,80 @@ namespace pccam_32.Services
                     ", Sub=" + stream.SubStream.Width + "x" + stream.SubStream.Height);
             }
         }
+
+        /// <summary>
+        /// 송출 여부와 무관하게 PC CAM 인증 상태를 확인하고 실행 중 인증 감시를 시작한다.
+        /// 
+        /// 사용 위치:
+        /// - 프로그램 시작 시 로컬 인증정보가 있는 경우
+        /// - 설정 화면에서 인증 등록이 완료된 경우
+        /// - 송출 시작 전에 인증 상태를 보장해야 하는 경우
+        /// </summary>
+        /// <param name="config">현재 PC CAM 설정.</param>
+        /// <returns>인증 확인 결과.</returns>
+        public AuthResult StartAuthMonitoring(AppConfig config)
+        {
+            if (_disposed)
+                throw new ObjectDisposedException("StreamSupervisorService");
+
+            if (config == null)
+                throw new ArgumentNullException("config");
+
+            AuthResult authResult = _authDllAdapter.CheckCanRun(config.Auth);
+
+            RaiseLog(
+                "인증 감시 시작 전 인증 확인. Success=" +
+                (authResult != null && authResult.IsSuccess) +
+                ", Message=" +
+                (authResult == null ? "" : authResult.Message) +
+                ", NextCheckAt=" +
+                (authResult != null && authResult.NextCheckAt.HasValue
+                    ? authResult.NextCheckAt.Value.ToString("yyyy-MM-dd HH:mm:ss")
+                    : ""));
+
+            if (authResult == null || !authResult.IsSuccess)
+            {
+                string message = authResult == null
+                    ? "인증 결과가 없습니다."
+                    : authResult.Message;
+
+                LastErrorMessage = message;
+
+                RaiseLog("인증 감시 시작 실패: " + message);
+
+                SetStatus(StreamRuntimeStatus.Unauthorized);
+
+                return authResult;
+            }
+
+            _runtimeAuthMonitorService.Start(authResult.NextCheckAt);
+
+            RaiseLog("인증 감시 시작 완료: " + authResult.Message);
+
+            return authResult;
+        }
+
+        /// <summary>
+        /// 실행 중 인증 감시를 중지한다.
+        /// 
+        /// 사용 위치:
+        /// - 프로그램 종료
+        /// - 로컬 인증정보 제거 완료 후
+        /// 
+        /// 송출 중지와 별개로 인증 감시 타이머만 명시적으로 중지하기 위한 메서드다.
+        /// </summary>
+        public void StopAuthMonitoring()
+        {
+            try
+            {
+                _runtimeAuthMonitorService.Stop();
+                RaiseLog("실행 중 인증 감시 중지 완료");
+            }
+            catch (Exception ex)
+            {
+                RaiseLog("실행 중 인증 감시 중지 중 오류: " + ex.Message);
+            }
+        }
+
     }
 }

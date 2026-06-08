@@ -50,7 +50,7 @@ namespace pccam_32.Views
             _contextMenu.Items.Add(_exitMenuItem);
 
             _notifyIcon = new NotifyIcon();
-            _notifyIcon.Icon = Properties.Resources.poscam_icon;
+            _notifyIcon.Icon = Properties.Resources.PCCAM;
             _notifyIcon.Text = "PC CAM";
             _notifyIcon.Visible = true;
             _notifyIcon.ContextMenuStrip = _contextMenu;

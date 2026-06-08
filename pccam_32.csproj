@@ -68,7 +68,7 @@
     <Prefer32Bit>true</Prefer32Bit>
   </PropertyGroup>
   <PropertyGroup>
-    <ApplicationIcon>Resources\poscam_icon.ico</ApplicationIcon>
+    <ApplicationIcon>Resources\PCCAM.ico</ApplicationIcon>
   </PropertyGroup>
   <PropertyGroup />
   <ItemGroup>
@@ -143,16 +143,6 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Views\TrayApplicationContext.cs" />
-    <EmbeddedResource Include="Properties\Resources.resx">
-      <Generator>ResXFileCodeGenerator</Generator>
-      <SubType>Designer</SubType>
-      <LastGenOutput>Resources.Designer.cs</LastGenOutput>
-      <SubType>Designer</SubType>
-    </EmbeddedResource>
-    <Compile Include="Properties\Resources.Designer.cs">
-      <AutoGen>True</AutoGen>
-      <DependentUpon>Resources.resx</DependentUpon>
-    </Compile>
     <None Include="app.manifest" />
     <None Include="packages.config" />
     <None Include="Properties\Settings.settings">
@@ -180,7 +170,9 @@
   <ItemGroup>
     <Content Include="External\ffmpeg.exe" />
     <Content Include="External\mediamtx_final_32bit.exe" />
-    <Content Include="Resources\poscam_icon.ico" />
+    <Content Include="PCCAM.ico" />
+    <None Include="Resources\PCCAM.ico" />
+    <None Include="Resources\poscam_icon.ico" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\PccAuthClinet\PccAuthClinet.csproj">
@@ -188,6 +180,11 @@
       <Name>PccAuthClinet</Name>
     </ProjectReference>
   </ItemGroup>
-  <ItemGroup />
+  <ItemGroup>
+    <EmbeddedResource Include="Properties\Resources.resx">
+      <Generator>ResXFileCodeGenerator</Generator>
+      <LastGenOutput>Resources.Designer.cs</LastGenOutput>
+    </EmbeddedResource>
+  </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

@@ -572,6 +572,32 @@ namespace pccam_32.Presenters
 
                 RefreshAuthButtonText();
 
+                RefreshAuthButtonText();
+
+                bool autoStartStreaming =
+                    _config.Operation != null &&
+                    _config.Operation.AutoStartStreaming;
+
+                /*
+                 * 자동 송출이 꺼져 있으면 송출 시작 흐름을 타지 않으므로
+                 * 인증 등록 직후 별도로 인증 감시를 시작한다.
+                 */
+                if (!autoStartStreaming)
+                {
+                    AuthResult monitorResult = _supervisor.StartAuthMonitoring(_config);
+
+                    if (monitorResult == null || !monitorResult.IsSuccess)
+                    {
+                        string message = monitorResult == null
+                            ? "인증 감시 시작 결과가 없습니다."
+                            : monitorResult.Message;
+
+                        throw new InvalidOperationException(
+                            "인증 등록은 완료되었지만 인증 감시 시작에 실패했습니다.\r\n" +
+                            message);
+                    }
+                }
+
                 bool streamingPolicyApplied = ApplyStreamingPolicyAfterSave(_config);
 
                 if (!streamingPolicyApplied)
@@ -644,6 +670,14 @@ namespace pccam_32.Presenters
 
                     return;
                 }
+                /*
+                 * 미등록 상태로 확정되었으므로 인증 감시를 중지한다.
+                 * 
+                 * 이유:
+                 * - 로컬 인증정보가 제거된 상태에서는 더 이상 24시간 재인증을 수행하면 안 된다.
+                 * - 송출 중이 아니어도 인증 감시 타이머가 살아 있을 수 있으므로 명시적으로 중지한다.
+                 */
+                _supervisor.StopAuthMonitoring();
 
                 /*
                  * 미등록 상태로 확정되었으므로 인증키 입력을 다시 허용한다.
