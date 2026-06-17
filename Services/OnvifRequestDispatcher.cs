@@ -39,12 +39,7 @@ namespace pccam_32.Services
         /// <param name="onvifPort">요청을 받은 ONVIF HTTP 포트.</param>
         /// <param name="streamNo">현재 ONVIF 포트에 연결된 Stream 번호.</param>
         /// <returns>SOAP 응답 XML.</returns>
-        public string Dispatch(
-            string requestBody,
-            AppConfig config,
-            string host,
-            int onvifPort,
-            int streamNo)
+        public string Dispatch(string requestBody, AppConfig config, string host, int onvifPort, int streamNo)
         {
             string actionName = GetActionName(requestBody);
 
@@ -68,17 +63,36 @@ namespace pccam_32.Services
 
             if (string.Equals(actionName, "GetProfiles", StringComparison.OrdinalIgnoreCase))
             {
-                /*
-                 * 중요:
-                 * 해당 ONVIF 포트에 해당하는 Stream의 Profile만 반환한다.
-                 * 
-                 * 예:
-                 * 8080 → profile_0_main, profile_0_sub
-                 * 8081 → profile_1_main, profile_1_sub
-                 */
                 return _responseBuilder.BuildGetProfilesResponse(config, streamNo);
             }
+            if (string.Equals(actionName, "GetVideoSources", StringComparison.OrdinalIgnoreCase))
+            {
+                return _responseBuilder.BuildGetVideoSourcesResponse(config, streamNo);
+            }
 
+            if (string.Equals(actionName, "GetVideoSourceConfigurations", StringComparison.OrdinalIgnoreCase))
+            {
+                return _responseBuilder.BuildGetVideoSourceConfigurationsResponse(config, streamNo);
+            }
+
+            if (string.Equals(actionName, "GetVideoSourceConfiguration", StringComparison.OrdinalIgnoreCase))
+            {
+                string configurationToken = ExtractVideoSourceConfigurationToken(requestBody, streamNo);
+
+                return _responseBuilder.BuildGetVideoSourceConfigurationResponse(config,configurationToken,streamNo);
+            }
+
+            if (string.Equals(actionName,"GetVideoEncoderConfigurations",StringComparison.OrdinalIgnoreCase))
+            {
+                return _responseBuilder.BuildGetVideoEncoderConfigurationsResponse( config, streamNo);
+            }
+
+            if (string.Equals( actionName, "GetVideoEncoderConfiguration", StringComparison.OrdinalIgnoreCase))
+            {
+                string configurationToken = ExtractConfigurationToken(requestBody, streamNo);
+
+                return _responseBuilder.BuildGetVideoEncoderConfigurationResponse(config, configurationToken, streamNo);
+            }
             if (string.Equals(actionName, "GetStreamUri", StringComparison.OrdinalIgnoreCase))
             {
                 /*
@@ -138,42 +152,121 @@ namespace pccam_32.Services
         }
 
         /// <summary>
-        /// ONVIF SOAP 요청 본문에서 요청 액션명을 추출한다.
-        /// 
-        /// 현재 구현은 XML 파서를 사용하지 않고,
-        /// 지원 대상 ONVIF 액션명이 요청 본문에 포함되어 있는지 확인한다.
+        /// ONVIF SOAP 요청 본문에서 요청 Action 이름을 판별한다.
+        ///
+        /// 주의:
+        /// 이름이 서로 포함되는 Action은 반드시 긴 이름부터 확인해야 한다.
+        ///
+        /// 예:
+        /// - GetVideoEncoderConfigurationOptions
+        /// - GetVideoEncoderConfigurations
+        /// - GetVideoEncoderConfiguration
+        ///
+        /// 짧은 이름을 먼저 검사하면 ConfigurationOptions 요청이
+        /// Configuration 요청으로 잘못 판별될 수 있다.
         /// </summary>
         public string GetActionName(string requestBody)
         {
+            /*
+             * 요청 본문이 없으면 다른 Action 검사를 수행하지 않는다.
+             */
             if (string.IsNullOrWhiteSpace(requestBody))
+            {
                 return "Empty";
+            }
 
+            /*
+             * VideoEncoder 관련 Action.
+             *
+             * Configuration이라는 문자열이 다른 Action 이름에도 포함되므로
+             * 가장 긴 이름부터 검사해야 한다.
+             */
+            if (ContainsAction(requestBody, "GetVideoEncoderConfigurationOptions"))
+            {
+                return "GetVideoEncoderConfigurationOptions";
+            }
+
+            if (ContainsAction(requestBody, "GetVideoEncoderConfigurations"))
+            {
+                return "GetVideoEncoderConfigurations";
+            }
+
+            if (ContainsAction(requestBody, "GetVideoEncoderConfiguration"))
+            {
+                return "GetVideoEncoderConfiguration";
+            }
+
+            /*
+             * VideoSource 관련 Action.
+             *
+             * Options와 Configurations를 singular Configuration보다
+             * 먼저 검사한다.
+             */
+            if (ContainsAction(requestBody, "GetVideoSourceConfigurationOptions"))
+            {
+                return "GetVideoSourceConfigurationOptions";
+            }
+
+            if (ContainsAction(requestBody, "GetVideoSourceConfigurations"))
+            {
+                return "GetVideoSourceConfigurations";
+            }
+
+            if (ContainsAction(requestBody, "GetVideoSourceConfiguration"))
+            {
+                return "GetVideoSourceConfiguration";
+            }
+
+            if (ContainsAction(requestBody, "GetVideoSources"))
+            {
+                return "GetVideoSources";
+            }
+
+            /*
+             * 기존 Device Service Action은 그대로 유지한다.
+             */
             if (ContainsAction(requestBody, "GetDeviceInformation"))
+            {
                 return "GetDeviceInformation";
+            }
 
             if (ContainsAction(requestBody, "GetSystemDateAndTime"))
+            {
                 return "GetSystemDateAndTime";
+            }
 
             if (ContainsAction(requestBody, "GetServices"))
+            {
                 return "GetServices";
+            }
 
             if (ContainsAction(requestBody, "GetScopes"))
+            {
                 return "GetScopes";
+            }
 
             if (ContainsAction(requestBody, "GetCapabilities"))
+            {
                 return "GetCapabilities";
+            }
 
+            /*
+             * 기존 Media Service Action도 그대로 유지한다.
+             */
             if (ContainsAction(requestBody, "GetProfiles"))
+            {
                 return "GetProfiles";
+            }
 
             if (ContainsAction(requestBody, "GetStreamUri"))
+            {
                 return "GetStreamUri";
-
-            if (ContainsAction(requestBody, "GetVideoEncoderConfigurationOptions"))
-                return "GetVideoEncoderConfigurationOptions";
+            }
 
             if (ContainsAction(requestBody, "GetNetworkInterfaces"))
+            {
                 return "GetNetworkInterfaces";
+            }
 
             return "Unknown";
         }
@@ -238,6 +331,65 @@ namespace pccam_32.Services
 
             if (string.IsNullOrWhiteSpace(token))
                 return "video_encoder_" + streamNo + "_main";
+
+            return token.Trim();
+        }
+
+        /// <summary>
+        /// ONVIF GetVideoSourceConfiguration 요청에서
+        /// ConfigurationToken 값을 추출한다.
+        ///
+        /// 요청에 토큰이 없으면 현재 ONVIF 포트에 해당하는
+        /// StreamNo 기준 기본 토큰을 반환한다.
+        ///
+        /// 토큰 형식:
+        /// - video_source_0
+        /// - video_source_1
+        /// - video_source_2
+        /// </summary>
+        /// <param name="requestBody">
+        /// NVR에서 전달한 ONVIF SOAP 요청 본문.
+        /// </param>
+        /// <param name="streamNo">
+        /// 현재 ONVIF 서비스 포트에 연결된 스트림 번호.
+        /// </param>
+        /// <returns>
+        /// 요청에서 추출한 VideoSourceConfiguration 토큰.
+        /// 토큰이 없으면 video_source_{streamNo}.
+        /// </returns>
+        private string ExtractVideoSourceConfigurationToken(
+            string requestBody,
+            int streamNo)
+        {
+            /*
+             * 요청 본문이 없으면 현재 스트림의 기본 토큰을 사용한다.
+             */
+            if (string.IsNullOrWhiteSpace(requestBody))
+            {
+                return "video_source_" + streamNo;
+            }
+
+            /*
+             * ONVIF 요청의 ConfigurationToken 요소를 찾는다.
+             *
+             * 예:
+             * <trt:ConfigurationToken>
+             *     video_source_0
+             * </trt:ConfigurationToken>
+             */
+            string token =
+                ExtractXmlElementValue(
+                    requestBody,
+                    "ConfigurationToken");
+
+            /*
+             * 일부 NVR은 ConfigurationToken을 전달하지 않을 수 있다.
+             * 이 경우 현재 ONVIF 포트의 StreamNo 기준 토큰을 사용한다.
+             */
+            if (string.IsNullOrWhiteSpace(token))
+            {
+                return "video_source_" + streamNo;
+            }
 
             return token.Trim();
         }
@@ -318,7 +470,5 @@ namespace pccam_32.Services
 
             return source.Substring(startIndex, endIndex - startIndex);
         }
-
-
     }
 }

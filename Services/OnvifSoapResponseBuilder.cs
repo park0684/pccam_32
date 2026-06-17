@@ -297,6 +297,307 @@ namespace pccam_32.Services
         }
 
         /// <summary>
+        /// 현재 ONVIF 포트에 연결된 영상 소스 정보를 반환한다.
+        ///
+        /// PC CAM에서는 하나의 StreamConfig가 하나의 모니터 영상 소스에 해당한다.
+        /// 실제 모니터 해상도는 송출 시작 전에 StreamConfig에 반영되어 있어야 한다.
+        /// </summary>
+        public string BuildGetVideoSourcesResponse(
+            AppConfig config,
+            int streamNo)
+        {
+            StreamConfig stream =
+                FindStream(config, streamNo);
+
+            if (stream == null)
+            {
+                stream =
+                    CreateFallbackStream(streamNo);
+            }
+
+            StreamQualityConfig mainStream =
+                stream.MainStream
+                ?? StreamQualityConfig.CreateMain(stream.RtspPath);
+
+            int width =
+                ResolveOnvifResolutionValue(
+                    mainStream.Width,
+                    stream,
+                    "main",
+                    "Width");
+
+            int height =
+                ResolveOnvifResolutionValue(
+                    mainStream.Height,
+                    stream,
+                    "main",
+                    "Height");
+
+            int fps =
+                mainStream.Fps > 0
+                    ? mainStream.Fps
+                    : stream.Fps;
+
+            if (fps <= 0)
+            {
+                fps = 5;
+            }
+
+            StringBuilder sb =
+                new StringBuilder();
+
+            sb.Append(CreateEnvelopeStart());
+
+            sb.Append("<trt:GetVideoSourcesResponse>");
+
+            sb.Append(
+                "<trt:VideoSources token=\"source_"
+                + stream.StreamNo
+                + "\">");
+
+            sb.Append(
+                "<tt:Framerate>"
+                + fps
+                + "</tt:Framerate>");
+
+            sb.Append("<tt:Resolution>");
+
+            sb.Append(
+                "<tt:Width>"
+                + width
+                + "</tt:Width>");
+
+            sb.Append(
+                "<tt:Height>"
+                + height
+                + "</tt:Height>");
+
+            sb.Append("</tt:Resolution>");
+
+            sb.Append("</trt:VideoSources>");
+            sb.Append("</trt:GetVideoSourcesResponse>");
+
+            sb.Append(CreateEnvelopeEnd());
+
+            return sb.ToString();
+        }
+
+
+        /// <summary>
+        /// 현재 ONVIF 포트에 연결된 VideoSourceConfiguration 목록을 반환한다.
+        /// </summary>
+        public string BuildGetVideoSourceConfigurationsResponse(
+            AppConfig config,
+            int streamNo)
+        {
+            StreamConfig stream =
+                FindStream(config, streamNo);
+
+            if (stream == null)
+            {
+                stream =
+                    CreateFallbackStream(streamNo);
+            }
+
+            StringBuilder sb =
+                new StringBuilder();
+
+            sb.Append(CreateEnvelopeStart());
+            sb.Append("<trt:GetVideoSourceConfigurationsResponse>");
+
+            AppendVideoSourceConfiguration(
+                sb,
+                "Configurations",
+                stream);
+
+            sb.Append("</trt:GetVideoSourceConfigurationsResponse>");
+            sb.Append(CreateEnvelopeEnd());
+
+            return sb.ToString();
+        }
+
+
+        /// <summary>
+        /// 지정된 VideoSourceConfiguration token에 해당하는 설정을 반환한다.
+        /// </summary>
+        public string BuildGetVideoSourceConfigurationResponse(
+            AppConfig config,
+            string configurationToken,
+            int fallbackStreamNo)
+        {
+            int streamNo =
+                ParseStreamNoFromSourceConfigurationToken(
+                    configurationToken,
+                    fallbackStreamNo);
+
+            StreamConfig stream =
+                FindStream(config, streamNo);
+
+            if (stream == null)
+            {
+                stream =
+                    CreateFallbackStream(streamNo);
+            }
+
+            StringBuilder sb =
+                new StringBuilder();
+
+            sb.Append(CreateEnvelopeStart());
+            sb.Append("<trt:GetVideoSourceConfigurationResponse>");
+
+            AppendVideoSourceConfiguration(
+                sb,
+                "Configuration",
+                stream);
+
+            sb.Append("</trt:GetVideoSourceConfigurationResponse>");
+            sb.Append(CreateEnvelopeEnd());
+
+            return sb.ToString();
+        }
+
+
+        /// <summary>
+        /// 현재 ONVIF 포트에 연결된 Main/Sub 영상 인코더 설정 목록을 반환한다.
+        /// </summary>
+        public string BuildGetVideoEncoderConfigurationsResponse(
+            AppConfig config,
+            int streamNo)
+        {
+            StreamConfig stream =
+                FindStream(config, streamNo);
+
+            if (stream == null)
+            {
+                stream =
+                    CreateFallbackStream(streamNo);
+            }
+
+            StreamQualityConfig mainStream =
+                stream.MainStream
+                ?? StreamQualityConfig.CreateMain(stream.RtspPath);
+
+            StreamQualityConfig subStream =
+                stream.SubStream
+                ?? StreamQualityConfig.CreateSub(
+                    stream.RtspPath + "_sub");
+
+            StringBuilder sb =
+                new StringBuilder();
+
+            sb.Append(CreateEnvelopeStart());
+            sb.Append("<trt:GetVideoEncoderConfigurationsResponse>");
+
+            bool hasConfiguration = false;
+
+            if (mainStream.IsEnabled)
+            {
+                AppendVideoEncoderConfiguration(
+                    sb,
+                    "Configurations",
+                    stream,
+                    mainStream,
+                    "main");
+
+                hasConfiguration = true;
+            }
+
+            if (subStream.IsEnabled)
+            {
+                AppendVideoEncoderConfiguration(
+                    sb,
+                    "Configurations",
+                    stream,
+                    subStream,
+                    "sub");
+
+                hasConfiguration = true;
+            }
+
+            /*
+             * Main/Sub가 모두 비활성 상태여도 빈 응답을 반환하지 않는다.
+             * 일부 NVR은 빈 설정 목록을 장치 등록 실패로 처리할 수 있다.
+             */
+            if (!hasConfiguration)
+            {
+                AppendVideoEncoderConfiguration(
+                    sb,
+                    "Configurations",
+                    stream,
+                    mainStream,
+                    "main");
+            }
+
+            sb.Append("</trt:GetVideoEncoderConfigurationsResponse>");
+            sb.Append(CreateEnvelopeEnd());
+
+            return sb.ToString();
+        }
+
+
+        /// <summary>
+        /// 지정된 VideoEncoderConfiguration token에 해당하는 현재 설정을 반환한다.
+        /// </summary>
+        public string BuildGetVideoEncoderConfigurationResponse(
+            AppConfig config,
+            string configurationToken,
+            int fallbackStreamNo)
+        {
+            int streamNo =
+                ParseStreamNoFromConfigurationToken(
+                    configurationToken,
+                    fallbackStreamNo);
+
+            bool isSub =
+                IsSubConfigurationToken(
+                    configurationToken);
+
+            StreamConfig stream =
+                FindStream(config, streamNo);
+
+            if (stream == null)
+            {
+                stream =
+                    CreateFallbackStream(streamNo);
+            }
+
+            StreamQualityConfig quality;
+
+            if (isSub)
+            {
+                quality =
+                    stream.SubStream
+                    ?? StreamQualityConfig.CreateSub(
+                        stream.RtspPath + "_sub");
+            }
+            else
+            {
+                quality =
+                    stream.MainStream
+                    ?? StreamQualityConfig.CreateMain(
+                        stream.RtspPath);
+            }
+
+            StringBuilder sb =
+                new StringBuilder();
+
+            sb.Append(CreateEnvelopeStart());
+            sb.Append("<trt:GetVideoEncoderConfigurationResponse>");
+
+            AppendVideoEncoderConfiguration(
+                sb,
+                "Configuration",
+                stream,
+                quality,
+                isSub ? "sub" : "main");
+
+            sb.Append("</trt:GetVideoEncoderConfigurationResponse>");
+            sb.Append(CreateEnvelopeEnd());
+
+            return sb.ToString();
+        }
+
+        /// <summary>
         /// 지원하지 않는 ONVIF 요청에 대한 SOAP Fault 응답을 생성한다.
         /// 
         /// 초기 구현 범위에 포함되지 않은 요청이 들어온 경우 사용한다.
@@ -1171,6 +1472,312 @@ namespace pccam_32.Services
                 ", Quality=" + qualityName +
                 ", Field=" + fieldName +
                 ". 송출 시작 전에 실제 MonitorInfo 해상도를 StreamConfig에 반영해야 합니다.");
+        }
+
+        /// <summary>
+        /// ONVIF VideoSourceConfiguration XML 요소를 생성한다.
+        /// </summary>
+        private void AppendVideoSourceConfiguration(
+            StringBuilder sb,
+            string elementName,
+            StreamConfig stream)
+        {
+            if (sb == null)
+            {
+                throw new ArgumentNullException("sb");
+            }
+
+            if (stream == null)
+            {
+                throw new ArgumentNullException("stream");
+            }
+
+            StreamQualityConfig mainStream =
+                stream.MainStream
+                ?? StreamQualityConfig.CreateMain(
+                    stream.RtspPath);
+
+            int width =
+                ResolveOnvifResolutionValue(
+                    mainStream.Width,
+                    stream,
+                    "main",
+                    "Width");
+
+            int height =
+                ResolveOnvifResolutionValue(
+                    mainStream.Height,
+                    stream,
+                    "main",
+                    "Height");
+
+            string token =
+                "video_source_"
+                + stream.StreamNo;
+
+            string sourceToken =
+                "source_"
+                + stream.StreamNo;
+
+            sb.Append(
+                "<trt:"
+                + elementName
+                + " token=\""
+                + XmlEscape(token)
+                + "\">");
+
+            sb.Append(
+                "<tt:Name>VideoSource"
+                + stream.StreamNo
+                + "</tt:Name>");
+
+            sb.Append("<tt:UseCount>1</tt:UseCount>");
+
+            sb.Append(
+                "<tt:SourceToken>"
+                + XmlEscape(sourceToken)
+                + "</tt:SourceToken>");
+
+            sb.Append(
+                "<tt:Bounds x=\"0\" y=\"0\" width=\""
+                + width
+                + "\" height=\""
+                + height
+                + "\" />");
+
+            sb.Append(
+                "</trt:"
+                + elementName
+                + ">");
+        }
+
+
+        /// <summary>
+        /// ONVIF VideoEncoderConfiguration XML 요소를 생성한다.
+        ///
+        /// GetVideoEncoderConfigurations에서는 Configurations 요소를 사용하고,
+        /// GetVideoEncoderConfiguration에서는 Configuration 요소를 사용한다.
+        /// </summary>
+        private void AppendVideoEncoderConfiguration(
+            StringBuilder sb,
+            string elementName,
+            StreamConfig stream,
+            StreamQualityConfig quality,
+            string qualityName)
+        {
+            if (sb == null)
+            {
+                throw new ArgumentNullException("sb");
+            }
+
+            if (stream == null)
+            {
+                throw new ArgumentNullException("stream");
+            }
+
+            if (quality == null)
+            {
+                throw new ArgumentNullException("quality");
+            }
+
+            string normalizedQualityName =
+                string.Equals(
+                    qualityName,
+                    "sub",
+                    StringComparison.OrdinalIgnoreCase)
+                    ? "sub"
+                    : "main";
+
+            int width =
+                ResolveOnvifResolutionValue(
+                    quality.Width,
+                    stream,
+                    normalizedQualityName,
+                    "Width");
+
+            int height =
+                ResolveOnvifResolutionValue(
+                    quality.Height,
+                    stream,
+                    normalizedQualityName,
+                    "Height");
+
+            int fps =
+                quality.Fps > 0
+                    ? quality.Fps
+                    : stream.Fps;
+
+            if (fps <= 0)
+            {
+                fps = 5;
+            }
+
+            int bitrate =
+                ParseBitrateKbps(
+                    quality.Bitrate);
+
+            if (bitrate <= 0)
+            {
+                bitrate =
+                    ParseBitrateKbps(
+                        stream.Bitrate);
+            }
+
+            if (bitrate <= 0)
+            {
+                bitrate =
+                    normalizedQualityName == "sub"
+                        ? 500
+                        : 1200;
+            }
+
+            int govLength =
+                Math.Max(
+                    1,
+                    fps * 2);
+
+            string codec =
+                NormalizeOnvifCodec(
+                    stream.Codec);
+
+            string token =
+                "video_encoder_"
+                + stream.StreamNo
+                + "_"
+                + normalizedQualityName;
+
+            sb.Append(
+                "<trt:"
+                + elementName
+                + " token=\""
+                + XmlEscape(token)
+                + "\">");
+
+            sb.Append(
+                "<tt:Name>VideoEncoder"
+                + stream.StreamNo
+                + "_"
+                + normalizedQualityName
+                + "</tt:Name>");
+
+            sb.Append("<tt:UseCount>1</tt:UseCount>");
+
+            sb.Append(
+                "<tt:Encoding>"
+                + codec
+                + "</tt:Encoding>");
+
+            sb.Append("<tt:Resolution>");
+
+            sb.Append(
+                "<tt:Width>"
+                + width
+                + "</tt:Width>");
+
+            sb.Append(
+                "<tt:Height>"
+                + height
+                + "</tt:Height>");
+
+            sb.Append("</tt:Resolution>");
+
+            sb.Append("<tt:Quality>5</tt:Quality>");
+
+            sb.Append("<tt:RateControl>");
+
+            sb.Append(
+                "<tt:FrameRateLimit>"
+                + fps
+                + "</tt:FrameRateLimit>");
+
+            sb.Append("<tt:EncodingInterval>1</tt:EncodingInterval>");
+
+            sb.Append(
+                "<tt:BitrateLimit>"
+                + bitrate
+                + "</tt:BitrateLimit>");
+
+            sb.Append("</tt:RateControl>");
+
+            /*
+             * 현재 PC CAM 기본 송출 코덱은 H.264이므로
+             * H.264 전용 정보를 함께 제공한다.
+             */
+            if (string.Equals(
+                    codec,
+                    "H264",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                sb.Append("<tt:H264>");
+
+                sb.Append(
+                    "<tt:GovLength>"
+                    + govLength
+                    + "</tt:GovLength>");
+
+                sb.Append("<tt:H264Profile>Baseline</tt:H264Profile>");
+
+                sb.Append("</tt:H264>");
+            }
+
+            /*
+             * 멀티캐스트 송출은 사용하지 않으므로 비활성 값으로 반환한다.
+             */
+            sb.Append("<tt:Multicast>");
+            sb.Append("<tt:Address>");
+            sb.Append("<tt:Type>IPv4</tt:Type>");
+            sb.Append("<tt:IPv4Address>0.0.0.0</tt:IPv4Address>");
+            sb.Append("</tt:Address>");
+            sb.Append("<tt:Port>0</tt:Port>");
+            sb.Append("<tt:TTL>0</tt:TTL>");
+            sb.Append("<tt:AutoStart>false</tt:AutoStart>");
+            sb.Append("</tt:Multicast>");
+
+            sb.Append("<tt:SessionTimeout>PT60S</tt:SessionTimeout>");
+
+            sb.Append(
+                "</trt:"
+                + elementName
+                + ">");
+        }
+
+
+        /// <summary>
+        /// video_source_{StreamNo} 형식의 token에서 StreamNo를 추출한다.
+        /// </summary>
+        private int ParseStreamNoFromSourceConfigurationToken(
+            string configurationToken,
+            int fallbackStreamNo)
+        {
+            if (string.IsNullOrWhiteSpace(configurationToken))
+            {
+                return fallbackStreamNo;
+            }
+
+            string[] parts =
+                configurationToken.Split('_');
+
+            /*
+             * 예상 형식:
+             * video_source_0
+             *
+             * [0] video
+             * [1] source
+             * [2] StreamNo
+             */
+            if (parts.Length >= 3)
+            {
+                int streamNo;
+
+                if (int.TryParse(
+                        parts[2],
+                        out streamNo))
+                {
+                    return streamNo;
+                }
+            }
+
+            return fallbackStreamNo;
         }
     }
 }
