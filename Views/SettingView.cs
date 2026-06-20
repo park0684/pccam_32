@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Windows.Forms;
 using pccam_32.Models;
+using pccam_32.Infrastructure;
 
 namespace pccam_32.Views
 {
@@ -320,7 +321,7 @@ namespace pccam_32.Views
 
         private void InitializeComponent()
         {
-            Text = "설정";
+            Text = "PC CAM 설정 - " + AppVersionProvider.DisplayVersion;
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false;

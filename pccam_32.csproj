@@ -91,6 +91,7 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Infrastructure\AppVersionProvider.cs" />
     <Compile Include="Infrastructure\IniFileHelper.cs" />
     <Compile Include="Infrastructure\PathProvider.cs" />
     <Compile Include="Infrastructure\ProcessRunner.cs" />
