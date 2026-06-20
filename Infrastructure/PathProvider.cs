@@ -44,6 +44,31 @@ namespace pccam_32.Infrastructure
         }
 
         /// <summary>
+        /// 실행 중에만 사용하는 런타임 파일 저장 폴더.
+        ///
+        /// 사용자별 LocalAppData에 저장하므로
+        /// 다른 일반 Windows 사용자가 직접 접근하기 어렵다.
+        ///
+        /// 예:
+        /// C:\Users\사용자명\AppData\Local\POSCAM\PCCAM\Runtime
+        /// </summary>
+        public string RuntimeDirectory
+        {
+            get
+            {
+                string localAppData =
+                    Environment.GetFolderPath(
+                        Environment.SpecialFolder.LocalApplicationData);
+
+                return Path.Combine(
+                    localAppData,
+                    "POSCAM",
+                    "PCCAM",
+                    "Runtime");
+            }
+        }
+
+        /// <summary>
         /// PC CAM INI 설정 파일 경로.
         /// </summary>
         public string AppConfigFilePath
@@ -68,11 +93,18 @@ namespace pccam_32.Infrastructure
         }
 
         /// <summary>
-        /// MediaMTX 설정 파일 경로.
+        /// 실행 중 MediaMTX가 읽을 런타임 설정 파일 경로.
+        ///
+        /// 인증정보가 포함되므로 설치 폴더나 External 폴더에 저장하지 않는다.
         /// </summary>
         public string MediaMtxConfigPath
         {
-            get { return Path.Combine(ExternalDirectory, "mediamtx.yml"); }
+            get
+            {
+                return Path.Combine(
+                    RuntimeDirectory,
+                    "mediamtx.runtime.yml");
+            }
         }
 
         /// <summary>
@@ -88,6 +120,12 @@ namespace pccam_32.Infrastructure
 
             if (!Directory.Exists(ExternalDirectory))
                 Directory.CreateDirectory(ExternalDirectory);
+
+            /*
+             * MediaMTX 인증 설정을 저장할 사용자 전용 런타임 폴더.
+             */
+            if (!Directory.Exists(RuntimeDirectory))
+                Directory.CreateDirectory(RuntimeDirectory);
         }
 
         /// <summary>

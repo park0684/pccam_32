@@ -2,6 +2,7 @@
 using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Collections.Generic;
 
 namespace pccam_32.Infrastructure
 {
@@ -74,80 +75,178 @@ namespace pccam_32.Infrastructure
 
         /// <summary>
         /// 외부 프로세스를 시작한다.
-        /// 
+        ///
         /// exePath:
         /// - 실행 파일 전체 경로
-        /// 
+        ///
         /// arguments:
         /// - 실행 인자
-        /// 
+        ///
         /// workingDirectory:
         /// - 실행 기준 폴더
         /// - null이면 exePath의 폴더를 사용한다.
+        ///
+        /// environmentVariables:
+        /// - 현재 실행하는 자식 프로세스에만 전달할 환경변수
+        /// - Windows 시스템 환경변수에는 저장하지 않는다.
         /// </summary>
-        public void Start(string exePath, string arguments, string workingDirectory = null)
+        public void Start(string exePath, string arguments, string workingDirectory = null, IDictionary<string,string> environmentVariables = null)
         {
             if (_disposed)
-                throw new ObjectDisposedException("ProcessRunner");
+            {
+                throw new ObjectDisposedException(
+                    "ProcessRunner");
+            }
 
             if (string.IsNullOrWhiteSpace(exePath))
-                throw new ArgumentException("실행 파일 경로가 비어 있습니다.", "exePath");
+            {
+                throw new ArgumentException(
+                    "실행 파일 경로가 비어 있습니다.",
+                    "exePath");
+            }
 
             if (!File.Exists(exePath))
-                throw new FileNotFoundException("실행 파일을 찾을 수 없습니다.", exePath);
+            {
+                throw new FileNotFoundException(
+                    "실행 파일을 찾을 수 없습니다.",
+                    exePath);
+            }
 
             lock (_syncLock)
             {
-                if (_process != null && !_process.HasExited)
-                    throw new InvalidOperationException("이미 실행 중인 프로세스가 있습니다.");
+                /*
+                 * 이전 Process 객체가 남아 있는 경우를 처리한다.
+                 *
+                 * 실행 중이면 중복 시작을 차단하고,
+                 * 이미 종료된 객체라면 Dispose한 뒤 새 프로세스를 생성한다.
+                 */
+                if (_process != null)
+                {
+                    bool hasExited = true;
+
+                    try
+                    {
+                        hasExited = _process.HasExited;
+                    }
+                    catch
+                    {
+                        /*
+                         * 이미 Dispose되었거나 Process 상태를 읽을 수 없다면
+                         * 종료된 객체로 보고 정리한다.
+                         */
+                        hasExited = true;
+                    }
+
+                    if (!hasExited)
+                    {
+                        throw new InvalidOperationException("이미 실행 중인 프로세스가 있습니다.");
+                    }
+
+                    CleanupProcess();
+                }
 
                 string resolvedWorkingDirectory = workingDirectory;
 
                 if (string.IsNullOrWhiteSpace(resolvedWorkingDirectory))
-                    resolvedWorkingDirectory = Path.GetDirectoryName(exePath);
+                {
+                    resolvedWorkingDirectory =Path.GetDirectoryName(exePath);
+                }
 
                 ProcessStartInfo startInfo = new ProcessStartInfo();
+
                 startInfo.FileName = exePath;
+
                 startInfo.Arguments = arguments ?? "";
+
                 startInfo.WorkingDirectory = resolvedWorkingDirectory;
 
                 /*
-                 * UseShellExecute = false
-                 * - 표준 출력/오류 리다이렉션을 사용하기 위해 필요하다.
-                 * 
-                 * CreateNoWindow = true
-                 * - FFmpeg, MediaMTX 콘솔창이 사용자에게 보이지 않도록 한다.
+                 * 표준 입출력을 리다이렉션하기 위해
+                 * UseShellExecute는 false로 유지한다.
                  */
                 startInfo.UseShellExecute = false;
+
                 startInfo.CreateNoWindow = true;
 
                 startInfo.RedirectStandardOutput = true;
+
                 startInfo.RedirectStandardError = true;
+
                 startInfo.RedirectStandardInput = true;
 
                 /*
-                 * Windows 7 한글 환경에서 로그가 깨지는 것을 줄이기 위한 설정.
-                 * FFmpeg/MediaMTX 로그는 대부분 영문이므로 큰 문제는 없지만,
-                 * 우선 시스템 기본 인코딩을 사용한다.
+                 * Windows 7 한글 환경에서 로그가 깨지는 현상을 줄이기 위해
+                 * 시스템 기본 인코딩을 사용한다.
                  */
                 startInfo.StandardOutputEncoding = Encoding.Default;
+
                 startInfo.StandardErrorEncoding = Encoding.Default;
 
+                /*
+                 * 현재 실행할 자식 프로세스에만 환경변수를 전달한다.
+                 */
+                if (environmentVariables != null)
+                {
+                    foreach ( KeyValuePair<string, string> item in environmentVariables)
+                    {
+                        if (string.IsNullOrWhiteSpace(item.Key))
+                        {
+                            continue;
+                        }
+
+                        startInfo.EnvironmentVariables[item.Key] = item.Value ?? "";
+                    }
+                }
+
                 _process = new Process();
+
                 _process.StartInfo = startInfo;
+
                 _process.EnableRaisingEvents = true;
 
                 _process.OutputDataReceived += Process_OutputDataReceived;
+
                 _process.ErrorDataReceived += Process_ErrorDataReceived;
+
                 _process.Exited += Process_Exited;
 
-                bool started = _process.Start();
+                try
+                {
+                    bool started = _process.Start();
 
-                if (!started)
-                    throw new InvalidOperationException("프로세스를 시작하지 못했습니다.");
+                    if (!started)
+                    {
+                        throw new InvalidOperationException("프로세스를 시작하지 못했습니다.");
+                    }
 
-                _process.BeginOutputReadLine();
-                _process.BeginErrorReadLine();
+                    _process.BeginOutputReadLine();
+                    _process.BeginErrorReadLine();
+                }
+                catch
+                {
+                    /*
+                     * Start 이후 로그 리다이렉션 시작 과정에서 오류가 발생하면
+                     * 외부 프로세스만 남는 상황을 방지한다.
+                     */
+                    try
+                    {
+                        if (_process != null && !_process.HasExited)
+                        {
+                            _process.Kill();
+                            _process.WaitForExit(3000);
+                        }
+                    }
+                    catch
+                    {
+                        /*
+                         * 이미 종료됐거나 Kill 권한이 없는 경우는 무시한다.
+                         */
+                    }
+
+                    CleanupProcess();
+
+                    throw;
+                }
             }
         }
 
@@ -273,35 +372,72 @@ namespace pccam_32.Infrastructure
                 handler(e.Data);
         }
 
+        /// <summary>
+        /// 외부 프로세스 종료 이벤트를 처리한다.
+        ///
+        /// 공유 필드인 _process가 아니라 이벤트를 발생시킨
+        /// 실제 Process 객체에서 종료 코드를 읽는다.
+        /// </summary>
         private void Process_Exited(object sender, EventArgs e)
         {
             int exitCode = -1;
 
+            Process exitedProcess = sender as Process;
+
             try
             {
-                if (_process != null)
-                    exitCode = _process.ExitCode;
+                if (exitedProcess != null)
+                {
+                    exitCode = exitedProcess.ExitCode;
+                }
             }
             catch
             {
+                /*
+                 * 이미 Dispose됐거나 종료 코드를 읽을 수 없으면
+                 * 알 수 없는 종료 코드로 처리한다.
+                 */
                 exitCode = -1;
             }
 
             Action<int> handler = Exited;
+
             if (handler != null)
+            {
                 handler(exitCode);
+            }
         }
 
+        /// <summary>
+        /// 현재 Process 객체의 이벤트 연결을 해제하고 Dispose한다.
+        ///
+        /// 이 메서드는 _syncLock 내부에서 호출하는 것을 전제로 한다.
+        /// </summary>
         private void CleanupProcess()
         {
-            if (_process == null)
+            Process process =
+                _process;
+
+            /*
+             * 다른 코드에서 정리 중인 Process 객체를 다시 사용하지 않도록
+             * 공유 필드를 먼저 비운다.
+             */
+            _process =
+                null;
+
+            if (process == null)
                 return;
 
             try
             {
-                _process.OutputDataReceived -= Process_OutputDataReceived;
-                _process.ErrorDataReceived -= Process_ErrorDataReceived;
-                _process.Exited -= Process_Exited;
+                process.OutputDataReceived -=
+                    Process_OutputDataReceived;
+
+                process.ErrorDataReceived -=
+                    Process_ErrorDataReceived;
+
+                process.Exited -=
+                    Process_Exited;
             }
             catch
             {
@@ -309,13 +445,11 @@ namespace pccam_32.Infrastructure
 
             try
             {
-                _process.Dispose();
+                process.Dispose();
             }
             catch
             {
             }
-
-            _process = null;
         }
 
         public void Dispose()

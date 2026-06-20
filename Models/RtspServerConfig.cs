@@ -29,6 +29,6 @@
         /// <summary>
         /// MediaMTX 설정 파일명.
         /// </summary>
-        public string ConfigFileName { get; set; } = "mediamtx.yml";
+       // public string ConfigFileName { get; set; } = "mediamtx.yml";
     }
 }
