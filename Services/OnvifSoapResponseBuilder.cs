@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Text;
 using pccam_32.Models;
+using pccam_32.Infrastructure;
 
 namespace pccam_32.Services
 {
@@ -49,20 +50,25 @@ namespace pccam_32.Services
 
         /// <summary>
         /// ONVIF 장치 정보 응답을 생성한다.
-        /// 
-        /// NVR은 장치 등록 과정에서 제조사, 모델명, 펌웨어 버전 등을 조회할 수 있다.
-        /// PC CAM은 실제 카메라는 아니지만 ONVIF 장치로 인식되기 위해 기본 장치 정보를 반환한다.
+        ///
+        /// NVR은 장치 등록 과정에서 제조사, 모델명,
+        /// 펌웨어 버전, 시리얼 번호 등을 조회할 수 있다.
+        ///
+        /// FirmwareVersion은 별도로 하드코딩하지 않고
+        /// PC CAM 실행 파일의 AssemblyFileVersion을 사용한다.
         /// </summary>
-        /// <returns>GetDeviceInformation SOAP 응답 XML.</returns>
+        /// <returns>
+        /// GetDeviceInformation SOAP 응답 XML.
+        /// </returns>
         public string BuildGetDeviceInformationResponse()
         {
             StringBuilder sb = new StringBuilder();
-
+            string firmwareVersion = AppVersionProvider.Version;
             sb.Append(CreateEnvelopeStart());
             sb.Append("<tds:GetDeviceInformationResponse>");
             sb.Append("<tds:Manufacturer>POSCAM</tds:Manufacturer>");
             sb.Append("<tds:Model>PC CAM</tds:Model>");
-            sb.Append("<tds:FirmwareVersion>1.0.0</tds:FirmwareVersion>");
+            sb.Append("<tds:FirmwareVersion>" + XmlEscape(firmwareVersion) + "</tds:FirmwareVersion>");
             sb.Append("<tds:SerialNumber>PCCAM-LOCAL</tds:SerialNumber>");
             sb.Append("<tds:HardwareId>PCCAM-32</tds:HardwareId>");
             sb.Append("</tds:GetDeviceInformationResponse>");
@@ -755,36 +761,18 @@ namespace pccam_32.Services
 
             string rtspHost = NormalizeHost(host);
 
-            string path = NormalizeRtspPath(
-                quality == null
-                    ? stream.RtspPath
-                    : quality.RtspPath);
+            string path =
+                NormalizeRtspPath(
+                    quality == null
+                        ? stream.RtspPath
+                        : quality.RtspPath);
 
-            string userId = "";
-            string password = "";
-
-            if (config.Onvif != null)
-            {
-                userId = config.Onvif.UserId ?? "";
-                password = config.Onvif.Password ?? "";
-            }
-
-            if (!string.IsNullOrWhiteSpace(userId) &&
-                !string.IsNullOrWhiteSpace(password))
-            {
-                return
-                    "rtsp://" +
-                    Uri.EscapeDataString(userId) +
-                    ":" +
-                    Uri.EscapeDataString(password) +
-                    "@" +
-                    rtspHost +
-                    ":" +
-                    config.RtspServer.RtspPort +
-                    "/" +
-                    path;
-            }
-
+            /*
+             * ONVIF GetStreamUri 응답에는 사용자명과 비밀번호를 포함하지 않는다.
+             *
+             * 실제 RTSP 읽기 인증은 MediaMTX의 런타임 설정 파일에서 처리한다.
+             * NVR 또는 VLC는 RTSP 연결 과정에서 별도로 인증한다.
+             */
             return
                 "rtsp://" +
                 rtspHost +
@@ -1005,6 +993,18 @@ namespace pccam_32.Services
             int fps = quality.Fps > 0
                 ? quality.Fps
                 : stream.Fps;
+            /*
+             * 실제 FFmpeg 송출 설정과 동일하게
+             * GOP는 FPS의 2배로 계산한다.
+             *
+             * 예:
+             * 10fps → GOP 20
+             * 5fps  → GOP 10
+             */
+            int govLength =
+                Math.Max(
+                    1,
+                    fps * 2);
 
             if (fps <= 0)
                 fps = 5;
@@ -1046,10 +1046,19 @@ namespace pccam_32.Services
             sb.Append("<tt:EncodingInterval>1</tt:EncodingInterval>");
             sb.Append("<tt:BitrateLimit>" + bitrateLimit + "</tt:BitrateLimit>");
             sb.Append("</tt:RateControl>");
-            sb.Append("<tt:H264>");
-            sb.Append("<tt:GovLength>" + fps + "</tt:GovLength>");
-            sb.Append("<tt:H264Profile>Baseline</tt:H264Profile>");
-            sb.Append("</tt:H264>");
+            /*
+             * H.264 송출일 때만 H.264 전용 설정을 반환한다.
+             *
+             * H.265 설정인데 H.264 요소를 함께 반환하면
+             * 일부 NVR에서 코덱 정보를 잘못 해석할 수 있다.
+             */
+            if (string.Equals(codec, "H264", StringComparison.OrdinalIgnoreCase))
+            {
+                sb.Append("<tt:H264>");
+                sb.Append("<tt:GovLength>" + govLength + "</tt:GovLength>");
+                sb.Append("<tt:H264Profile>Baseline</tt:H264Profile>");
+                sb.Append("</tt:H264>");
+            }
             sb.Append("</tt:VideoEncoderConfiguration>");
 
             sb.Append("</trt:Profiles>");
@@ -1297,6 +1306,14 @@ namespace pccam_32.Services
             int minFps = 1;
             int maxFps = fps < 1 ? 10 : Math.Max(fps, 10);
 
+            /*
+             * 실제 송출 GOP가 FPS의 2배이므로,
+             * 옵션 응답의 GOP 최대값도 현재 설정을 포함해야 한다.
+             */
+            int minGovLength = 1;
+
+            int maxGovLength =Math.Max(1, fps * 2);
+
             int minBitrate = isSub ? 100 : 300;
             int maxBitrate = Math.Max(bitrateKbps, isSub ? 1000 : 3000);
 
@@ -1352,8 +1369,8 @@ namespace pccam_32.Services
             sb.Append("</tt:ResolutionsAvailable>");
 
             sb.Append("<tt:GovLengthRange>");
-            sb.Append("<tt:Min>1</tt:Min>");
-            sb.Append("<tt:Max>" + maxFps + "</tt:Max>");
+            sb.Append("<tt:Min>" + minGovLength + "</tt:Min>");
+            sb.Append("<tt:Max>" + maxGovLength + "</tt:Max>");
             sb.Append("</tt:GovLengthRange>");
 
             sb.Append("<tt:FrameRateRange>");

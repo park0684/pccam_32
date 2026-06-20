@@ -453,7 +453,7 @@ namespace pccam_32.Services
             config.RtspServer.RtspPort = ini.ReadInt("RtspServer", "RtspPort", config.RtspServer.RtspPort);
             config.RtspServer.RtmpPort = ini.ReadInt("RtspServer", "RtmpPort", config.RtspServer.RtmpPort);
             config.RtspServer.ServerExeName = ini.ReadString("RtspServer", "ServerExeName", config.RtspServer.ServerExeName);
-            config.RtspServer.ConfigFileName = ini.ReadString("RtspServer", "ConfigFileName", config.RtspServer.ConfigFileName);
+            //config.RtspServer.ConfigFileName = ini.ReadString("RtspServer", "ConfigFileName", config.RtspServer.ConfigFileName);
         }
 
         private void SaveRtspServer(IniFileHelper ini, RtspServerConfig rtspServer)
@@ -461,7 +461,7 @@ namespace pccam_32.Services
             ini.WriteInt("RtspServer", "RtspPort", rtspServer.RtspPort);
             ini.WriteInt("RtspServer", "RtmpPort", rtspServer.RtmpPort);
             ini.WriteString("RtspServer", "ServerExeName", rtspServer.ServerExeName);
-            ini.WriteString("RtspServer", "ConfigFileName", rtspServer.ConfigFileName);
+            //ini.WriteString("RtspServer", "ConfigFileName", rtspServer.ConfigFileName);
         }
 
 
